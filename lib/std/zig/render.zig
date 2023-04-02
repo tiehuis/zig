@@ -22,15 +22,23 @@ pub fn renderTree(buffer: *std.ArrayList(u8), tree: Ast) Error!void {
     };
     const ais = &auto_indenting_stream;
 
-    // Render all the line comments at the beginning of the file.
-    const comment_end_loc = tree.tokens.items(.start)[0];
-    _ = try renderComments(ais, tree, 0, comment_end_loc);
+    switch (tree.mode) {
+        .zig => {
+            // Render all the line comments at the beginning of the file.
+            const comment_end_loc = tree.tokens.items(.start)[0];
+            _ = try renderComments(ais, tree, 0, comment_end_loc);
 
-    if (tree.tokens.items(.tag)[0] == .container_doc_comment) {
-        try renderContainerDocComments(ais, tree, 0);
+            if (tree.tokens.items(.tag)[0] == .container_doc_comment) {
+                try renderContainerDocComments(ais, tree, 0);
+            }
+
+            try renderMembers(buffer.allocator, ais, tree, tree.rootDecls());
+        },
+        .zon => {
+            const root = tree.nodes.items(.data)[0];
+            try renderExpression(buffer.allocator, ais, tree, root.lhs, .newline);
+        },
     }
-
-    try renderMembers(buffer.allocator, ais, tree, tree.rootDecls());
 
     if (ais.disabled_offset) |disabled_offset| {
         try writeFixingWhitespace(ais.underlying_writer, tree.source[disabled_offset..]);

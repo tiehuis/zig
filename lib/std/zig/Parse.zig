@@ -180,16 +180,13 @@ pub fn parseRoot(p: *Parse) !void {
 }
 
 /// Parse in ZON mode. Subset of the language.
-/// TODO: set a flag in Parse struct, and honor that flag
-/// by emitting compilation errors when non-zon nodes are encountered.
 pub fn parseZon(p: *Parse) !void {
-    // We must use index 0 so that 0 can be used as null elsewhere.
     p.nodes.appendAssumeCapacity(.{
         .tag = .root,
         .main_token = 0,
         .data = undefined,
     });
-    const node_index = p.expectExpr() catch |err| switch (err) {
+    const node_index = p.expectZonExpr() catch |err| switch (err) {
         error.ParseError => {
             assert(p.errors.items.len > 0);
             return;
@@ -2462,6 +2459,235 @@ fn parseSuffixExpr(p: *Parse) !Node.Index {
     }
 }
 
+fn expectZonExpr(p: *Parse) Error!Node.Index {
+    const node = try p.parseZonExpr();
+    if (node == 0) {
+        return p.fail(.expected_zon_expr);
+    }
+    return node;
+}
+
+// ZonExpression
+//      <- ZonNumber
+//       | DOT IDENTIFIER
+//       | DOT ZonInitList
+fn parseZonExpr(p: *Parse) !Node.Index {
+    const tok_tag = p.token_tags[p.tok_i];
+    std.debug.print("{s}\n", .{@tagName(tok_tag)});
+    switch (tok_tag) {
+        .minus, .number_literal => return parseZonExprNumber(p, .minus_ok),
+
+        .string_literal => return p.addNode(.{
+            .tag = .string_literal,
+            .main_token = p.nextToken(),
+            .data = .{
+                .lhs = undefined,
+                .rhs = undefined,
+            },
+        }),
+        .identifier => {
+            const ident_slice = p.source[p.token_starts[p.tok_i]..p.token_starts[p.tok_i + 1]];
+            const ident_slice_norm = std.mem.trimRight(u8, ident_slice, &std.ascii.whitespace);
+            const allowed_literals = [_][]const u8{ "null", "undefined", "true", "false" };
+            const found = blk: {
+                for (allowed_literals) |lit| {
+                    if (std.mem.eql(u8, ident_slice_norm, lit)) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            };
+            if (!found) {
+                try p.warn(.expected_zon_literal);
+            }
+
+            return try p.addNode(.{
+                .tag = .identifier,
+                .main_token = p.nextToken(),
+                .data = .{
+                    .lhs = undefined,
+                    .rhs = undefined,
+                },
+            });
+        },
+
+        .period => return p.parseInitList(expectZonExpr),
+
+        else => return p.fail(.unexpected_zon_syntax),
+    }
+}
+
+// ZonNumber
+//      <- [-]? INTEGER
+//       | [-]? FLOAT
+fn parseZonExprNumber(p: *Parse, minus_state: enum { minus_ok, minus_banned }) !Node.Index {
+    const tok_tag = p.token_tags[p.tok_i];
+    switch (tok_tag) {
+        .minus => {
+            if (minus_state == .minus_banned) {
+                try p.warn(.unexpected_zon_minus);
+            }
+
+            return p.addNode(.{
+                .tag = .negation,
+                .main_token = p.nextToken(),
+                .data = .{
+                    .lhs = try p.parseZonExprNumber(.minus_banned),
+                    .rhs = undefined,
+                },
+            });
+        },
+        .number_literal => return p.addNode(.{
+            .tag = .number_literal,
+            .main_token = p.nextToken(),
+            .data = .{
+                .lhs = undefined,
+                .rhs = undefined,
+            },
+        }),
+        else => unreachable,
+    }
+}
+
+/// InitList
+///     <- LBRACE FieldInit (COMMA FieldInit)* COMMA? RBRACE
+///      / LBRACE Expr (COMMA Expr)* COMMA? RBRACE
+///      / LBRACE RBRACE
+///
+/// ZonInitList
+///     <- LBRACE FieldInit (COMMA FieldInit)* COMMA? RBRACE
+///      / LBRACE ZonExpr (COMMA ZonExpr)* COMMA? RBRACE
+///      / LBRACE RBRACE
+fn parseInitList(p: *Parse, expectExprImpl: *const fn (*Parse) Error!Node.Index) !Node.Index {
+    return switch (p.token_tags[p.tok_i + 1]) {
+        .identifier => return p.addNode(.{
+            .tag = .enum_literal,
+            .data = .{
+                .lhs = p.nextToken(), // dot
+                .rhs = undefined,
+            },
+            .main_token = p.nextToken(), // identifier
+        }),
+        .l_brace => {
+            const lbrace = p.tok_i + 1;
+            p.tok_i = lbrace + 1;
+
+            // If there are 0, 1, or 2 items, we can use ArrayInitDotTwo/StructInitDotTwo;
+            // otherwise we use the full ArrayInitDot/StructInitDot.
+
+            const scratch_top = p.scratch.items.len;
+            defer p.scratch.shrinkRetainingCapacity(scratch_top);
+            const field_init = try p.parseFieldInit();
+            if (field_init != 0) {
+                try p.scratch.append(p.gpa, field_init);
+                while (true) {
+                    switch (p.token_tags[p.tok_i]) {
+                        .comma => p.tok_i += 1,
+                        .r_brace => {
+                            p.tok_i += 1;
+                            break;
+                        },
+                        .colon, .r_paren, .r_bracket => return p.failExpected(.r_brace),
+                        // Likely just a missing comma; give error but continue parsing.
+                        else => try p.warn(.expected_comma_after_initializer),
+                    }
+                    if (p.eatToken(.r_brace)) |_| break;
+                    const next = try p.expectFieldInit();
+                    try p.scratch.append(p.gpa, next);
+                }
+                const comma = (p.token_tags[p.tok_i - 2] == .comma);
+                const inits = p.scratch.items[scratch_top..];
+                switch (inits.len) {
+                    0 => unreachable,
+                    1 => return p.addNode(.{
+                        .tag = if (comma) .struct_init_dot_two_comma else .struct_init_dot_two,
+                        .main_token = lbrace,
+                        .data = .{
+                            .lhs = inits[0],
+                            .rhs = 0,
+                        },
+                    }),
+                    2 => return p.addNode(.{
+                        .tag = if (comma) .struct_init_dot_two_comma else .struct_init_dot_two,
+                        .main_token = lbrace,
+                        .data = .{
+                            .lhs = inits[0],
+                            .rhs = inits[1],
+                        },
+                    }),
+                    else => {
+                        const span = try p.listToSpan(inits);
+                        return p.addNode(.{
+                            .tag = if (comma) .struct_init_dot_comma else .struct_init_dot,
+                            .main_token = lbrace,
+                            .data = .{
+                                .lhs = span.start,
+                                .rhs = span.end,
+                            },
+                        });
+                    },
+                }
+            }
+
+            while (true) {
+                if (p.eatToken(.r_brace)) |_| break;
+                const elem_init = try expectExprImpl(p);
+                try p.scratch.append(p.gpa, elem_init);
+                switch (p.token_tags[p.tok_i]) {
+                    .comma => p.tok_i += 1,
+                    .r_brace => {
+                        p.tok_i += 1;
+                        break;
+                    },
+                    .colon, .r_paren, .r_bracket => return p.failExpected(.r_brace),
+                    // Likely just a missing comma; give error but continue parsing.
+                    else => try p.warn(.expected_comma_after_initializer),
+                }
+            }
+            const comma = (p.token_tags[p.tok_i - 2] == .comma);
+            const inits = p.scratch.items[scratch_top..];
+            switch (inits.len) {
+                0 => return p.addNode(.{
+                    .tag = .struct_init_dot_two,
+                    .main_token = lbrace,
+                    .data = .{
+                        .lhs = 0,
+                        .rhs = 0,
+                    },
+                }),
+                1 => return p.addNode(.{
+                    .tag = if (comma) .array_init_dot_two_comma else .array_init_dot_two,
+                    .main_token = lbrace,
+                    .data = .{
+                        .lhs = inits[0],
+                        .rhs = 0,
+                    },
+                }),
+                2 => return p.addNode(.{
+                    .tag = if (comma) .array_init_dot_two_comma else .array_init_dot_two,
+                    .main_token = lbrace,
+                    .data = .{
+                        .lhs = inits[0],
+                        .rhs = inits[1],
+                    },
+                }),
+                else => {
+                    const span = try p.listToSpan(inits);
+                    return p.addNode(.{
+                        .tag = if (comma) .array_init_dot_comma else .array_init_dot,
+                        .main_token = lbrace,
+                        .data = .{
+                            .lhs = span.start,
+                            .rhs = span.end,
+                        },
+                    });
+                },
+            }
+        },
+        else => return null_node,
+    };
+}
+
 /// PrimaryTypeExpr
 ///     <- BUILTINIDENTIFIER FnCallArguments
 ///      / CHAR_LITERAL
@@ -2639,133 +2865,8 @@ fn parsePrimaryTypeExpr(p: *Parse) !Node.Index {
         },
         .keyword_for => return p.parseForTypeExpr(),
         .keyword_while => return p.parseWhileTypeExpr(),
-        .period => switch (p.token_tags[p.tok_i + 1]) {
-            .identifier => return p.addNode(.{
-                .tag = .enum_literal,
-                .data = .{
-                    .lhs = p.nextToken(), // dot
-                    .rhs = undefined,
-                },
-                .main_token = p.nextToken(), // identifier
-            }),
-            .l_brace => {
-                const lbrace = p.tok_i + 1;
-                p.tok_i = lbrace + 1;
+        .period => return p.parseInitList(expectExpr),
 
-                // If there are 0, 1, or 2 items, we can use ArrayInitDotTwo/StructInitDotTwo;
-                // otherwise we use the full ArrayInitDot/StructInitDot.
-
-                const scratch_top = p.scratch.items.len;
-                defer p.scratch.shrinkRetainingCapacity(scratch_top);
-                const field_init = try p.parseFieldInit();
-                if (field_init != 0) {
-                    try p.scratch.append(p.gpa, field_init);
-                    while (true) {
-                        switch (p.token_tags[p.tok_i]) {
-                            .comma => p.tok_i += 1,
-                            .r_brace => {
-                                p.tok_i += 1;
-                                break;
-                            },
-                            .colon, .r_paren, .r_bracket => return p.failExpected(.r_brace),
-                            // Likely just a missing comma; give error but continue parsing.
-                            else => try p.warn(.expected_comma_after_initializer),
-                        }
-                        if (p.eatToken(.r_brace)) |_| break;
-                        const next = try p.expectFieldInit();
-                        try p.scratch.append(p.gpa, next);
-                    }
-                    const comma = (p.token_tags[p.tok_i - 2] == .comma);
-                    const inits = p.scratch.items[scratch_top..];
-                    switch (inits.len) {
-                        0 => unreachable,
-                        1 => return p.addNode(.{
-                            .tag = if (comma) .struct_init_dot_two_comma else .struct_init_dot_two,
-                            .main_token = lbrace,
-                            .data = .{
-                                .lhs = inits[0],
-                                .rhs = 0,
-                            },
-                        }),
-                        2 => return p.addNode(.{
-                            .tag = if (comma) .struct_init_dot_two_comma else .struct_init_dot_two,
-                            .main_token = lbrace,
-                            .data = .{
-                                .lhs = inits[0],
-                                .rhs = inits[1],
-                            },
-                        }),
-                        else => {
-                            const span = try p.listToSpan(inits);
-                            return p.addNode(.{
-                                .tag = if (comma) .struct_init_dot_comma else .struct_init_dot,
-                                .main_token = lbrace,
-                                .data = .{
-                                    .lhs = span.start,
-                                    .rhs = span.end,
-                                },
-                            });
-                        },
-                    }
-                }
-
-                while (true) {
-                    if (p.eatToken(.r_brace)) |_| break;
-                    const elem_init = try p.expectExpr();
-                    try p.scratch.append(p.gpa, elem_init);
-                    switch (p.token_tags[p.tok_i]) {
-                        .comma => p.tok_i += 1,
-                        .r_brace => {
-                            p.tok_i += 1;
-                            break;
-                        },
-                        .colon, .r_paren, .r_bracket => return p.failExpected(.r_brace),
-                        // Likely just a missing comma; give error but continue parsing.
-                        else => try p.warn(.expected_comma_after_initializer),
-                    }
-                }
-                const comma = (p.token_tags[p.tok_i - 2] == .comma);
-                const inits = p.scratch.items[scratch_top..];
-                switch (inits.len) {
-                    0 => return p.addNode(.{
-                        .tag = .struct_init_dot_two,
-                        .main_token = lbrace,
-                        .data = .{
-                            .lhs = 0,
-                            .rhs = 0,
-                        },
-                    }),
-                    1 => return p.addNode(.{
-                        .tag = if (comma) .array_init_dot_two_comma else .array_init_dot_two,
-                        .main_token = lbrace,
-                        .data = .{
-                            .lhs = inits[0],
-                            .rhs = 0,
-                        },
-                    }),
-                    2 => return p.addNode(.{
-                        .tag = if (comma) .array_init_dot_two_comma else .array_init_dot_two,
-                        .main_token = lbrace,
-                        .data = .{
-                            .lhs = inits[0],
-                            .rhs = inits[1],
-                        },
-                    }),
-                    else => {
-                        const span = try p.listToSpan(inits);
-                        return p.addNode(.{
-                            .tag = if (comma) .array_init_dot_comma else .array_init_dot,
-                            .main_token = lbrace,
-                            .data = .{
-                                .lhs = span.start,
-                                .rhs = span.end,
-                            },
-                        });
-                    },
-                }
-            },
-            else => return null_node,
-        },
         .keyword_error => switch (p.token_tags[p.tok_i + 1]) {
             .l_brace => {
                 const error_token = p.tok_i;

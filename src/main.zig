@@ -4693,6 +4693,7 @@ pub const usage_fmt =
     \\                          if the list is non-empty
     \\   --ast-check            Run zig ast-check on every file
     \\   --exclude [file]       Exclude file or directory from formatting
+    \\   --zon                  Format zon files.
     \\
     \\
 ;
@@ -4715,6 +4716,7 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
     var check_flag: bool = false;
     var check_ast_flag: bool = false;
     var input_files = ArrayList([]const u8).init(gpa);
+    var parse_mode: Ast.Mode = .zig;
     defer input_files.deinit();
     var excluded_files = ArrayList([]const u8).init(gpa);
     defer excluded_files.deinit();
@@ -4750,6 +4752,8 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
                     i += 1;
                     const next_arg = args[i];
                     try excluded_files.append(next_arg);
+                } else if (mem.eql(u8, arg, "--zon")) {
+                    parse_mode = .zon;
                 } else {
                     fatal("unrecognized parameter: '{s}'", .{arg});
                 }
@@ -4770,7 +4774,7 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
         };
         defer gpa.free(source_code);
 
-        var tree = Ast.parse(gpa, source_code, .zig) catch |err| {
+        var tree = Ast.parse(gpa, source_code, parse_mode) catch |err| {
             fatal("error parsing stdin: {}", .{err});
         };
         defer tree.deinit(gpa);
@@ -4852,7 +4856,7 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
     }
 
     for (input_files.items) |file_path| {
-        try fmtPath(&fmt, file_path, check_flag, fs.cwd(), file_path);
+        try fmtPath(&fmt, file_path, check_flag, fs.cwd(), file_path, parse_mode);
     }
     if (fmt.any_error) {
         process.exit(1);
@@ -4888,9 +4892,16 @@ const FmtError = error{
     InvalidArgument,
 } || fs.File.OpenError;
 
-fn fmtPath(fmt: *Fmt, file_path: []const u8, check_mode: bool, dir: fs.Dir, sub_path: []const u8) FmtError!void {
-    fmtPathFile(fmt, file_path, check_mode, dir, sub_path) catch |err| switch (err) {
-        error.IsDir, error.AccessDenied => return fmtPathDir(fmt, file_path, check_mode, dir, sub_path),
+fn fmtPath(
+    fmt: *Fmt,
+    file_path: []const u8,
+    check_mode: bool,
+    dir: fs.Dir,
+    sub_path: []const u8,
+    parse_mode: Ast.Mode,
+) FmtError!void {
+    fmtPathFile(fmt, file_path, check_mode, dir, sub_path, parse_mode) catch |err| switch (err) {
+        error.IsDir, error.AccessDenied => return fmtPathDir(fmt, file_path, check_mode, dir, sub_path, parse_mode),
         else => {
             warn("unable to format '{s}': {s}", .{ file_path, @errorName(err) });
             fmt.any_error = true;
@@ -4905,6 +4916,7 @@ fn fmtPathDir(
     check_mode: bool,
     parent_dir: fs.Dir,
     parent_sub_path: []const u8,
+    parse_mode: Ast.Mode,
 ) FmtError!void {
     var iterable_dir = try parent_dir.openIterableDir(parent_sub_path, .{});
     defer iterable_dir.close();
@@ -4923,9 +4935,9 @@ fn fmtPathDir(
             defer fmt.gpa.free(full_path);
 
             if (is_dir) {
-                try fmtPathDir(fmt, full_path, check_mode, iterable_dir.dir, entry.name);
+                try fmtPathDir(fmt, full_path, check_mode, iterable_dir.dir, entry.name, parse_mode);
             } else {
-                fmtPathFile(fmt, full_path, check_mode, iterable_dir.dir, entry.name) catch |err| {
+                fmtPathFile(fmt, full_path, check_mode, iterable_dir.dir, entry.name, parse_mode) catch |err| {
                     warn("unable to format '{s}': {s}", .{ full_path, @errorName(err) });
                     fmt.any_error = true;
                     return;
@@ -4941,6 +4953,7 @@ fn fmtPathFile(
     check_mode: bool,
     dir: fs.Dir,
     sub_path: []const u8,
+    parse_mode: Ast.Mode,
 ) FmtError!void {
     const source_file = try dir.openFile(sub_path, .{});
     var file_closed = false;
@@ -4965,7 +4978,7 @@ fn fmtPathFile(
     // Add to set after no longer possible to get error.IsDir.
     if (try fmt.seen.fetchPut(stat.inode, {})) |_| return;
 
-    var tree = try Ast.parse(gpa, source_code, .zig);
+    var tree = try Ast.parse(gpa, source_code, parse_mode);
     defer tree.deinit(gpa);
 
     if (tree.errors.len != 0) {

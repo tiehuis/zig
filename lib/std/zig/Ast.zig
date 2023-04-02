@@ -12,6 +12,7 @@ tokens: TokenList.Slice,
 /// references to the root node, this means 0 is available to indicate null.
 nodes: NodeList.Slice,
 extra_data: []Node.Index,
+mode: Mode,
 
 errors: []const Error,
 
@@ -100,6 +101,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
         .nodes = parser.nodes.toOwnedSlice(),
         .extra_data = try parser.extra_data.toOwnedSlice(gpa),
         .errors = try parser.errors.toOwnedSlice(gpa),
+        .mode = mode,
     };
 }
 
@@ -444,6 +446,20 @@ pub fn renderError(tree: Ast, parse_error: Error, stream: anytype) !void {
                     expected_symbol, found_tag.symbol(),
                 }),
             }
+        },
+
+        .expected_zon_literal => {
+            return stream.writeAll("zon only supports 'true', 'false', 'undefined' or 'null' simple literals");
+        },
+        .expected_zon_expr => {
+            return stream.writeAll("zon top-level must be an anonymous struct literal, anonymous tuple, anonymous enum or simple expression");
+        },
+        .unexpected_zon_minus => {
+            return stream.writeAll("zon only supports single minus on integer or float literals");
+        },
+        .unexpected_zon_syntax => {
+            const found_tag = token_tags[parse_error.token + @boolToInt(parse_error.token_is_prev)];
+            return stream.print("unexpected zon token: '{s}'\n", .{found_tag.symbol()});
         },
     }
 }
@@ -2902,6 +2918,11 @@ pub const Error = struct {
 
         /// `expected_tag` is populated.
         expected_token,
+
+        expected_zon_literal,
+        expected_zon_expr,
+        unexpected_zon_minus,
+        unexpected_zon_syntax,
     };
 };
 
