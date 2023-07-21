@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const expectEqual = std.testing.expectEqual;
+const UnalignedIterator = @import("unaligned_iterator.zig").UnalignedIterator;
 
 const rotl = std.math.rotl;
 
@@ -11,8 +12,7 @@ pub const XxHash64 = struct {
     acc4: u64,
 
     seed: u64,
-    buf: [32]u8,
-    buf_len: usize,
+    iterator: UnalignedIterator(32),
     byte_count: usize,
 
     const prime_1 = 0x9E3779B185EBCA87; // 0b1001111000110111011110011011000110000101111010111100101010000111
@@ -28,35 +28,26 @@ pub const XxHash64 = struct {
             .acc2 = seed +% prime_2,
             .acc3 = seed,
             .acc4 = seed -% prime_1,
-            .buf = undefined,
-            .buf_len = 0,
             .byte_count = 0,
+            .iterator = .{},
         };
     }
 
     pub fn update(self: *XxHash64, input: []const u8) void {
-        if (input.len < 32 - self.buf_len) {
-            @memcpy(self.buf[self.buf_len..][0..input.len], input);
-            self.buf_len += input.len;
-            return;
-        }
+        self.iterator.update(self, processStripe, input);
+    }
 
+    pub fn final(self: *XxHash64) u64 {
+        return self.finalInternal(self.iterator.buf[0..self.iterator.buf_len]);
+    }
+
+    pub fn hash(seed: u64, input: []const u8) u64 {
+        var self = XxHash64.init(seed);
         var i: usize = 0;
-
-        if (self.buf_len > 0) {
-            i = 32 - self.buf_len;
-            @memcpy(self.buf[self.buf_len..][0..i], input[0..i]);
-            self.processStripe(&self.buf);
-            self.buf_len = 0;
-        }
-
         while (i + 32 <= input.len) : (i += 32) {
             self.processStripe(input[i..][0..32]);
         }
-
-        const remaining_bytes = input[i..];
-        @memcpy(self.buf[0..remaining_bytes.len], remaining_bytes);
-        self.buf_len = remaining_bytes.len;
+        return self.finalInternal(input[i..]);
     }
 
     inline fn processStripe(self: *XxHash64, buf: *const [32]u8) void {
@@ -73,7 +64,7 @@ pub const XxHash64 = struct {
         return b *% prime_1;
     }
 
-    pub fn final(self: *XxHash64) u64 {
+    inline fn finalInternal(self: *XxHash64, input: []const u8) u64 {
         var acc: u64 = undefined;
 
         if (self.byte_count < 32) {
@@ -87,26 +78,26 @@ pub const XxHash64 = struct {
             acc = mergeAccumulator(acc, self.acc4);
         }
 
-        acc = acc +% @as(u64, self.byte_count) +% @as(u64, self.buf_len);
+        acc = acc +% @as(u64, self.byte_count) +% @as(u64, input.len);
 
         var pos: usize = 0;
-        while (pos + 8 <= self.buf_len) : (pos += 8) {
-            const lane = mem.readIntLittle(u64, self.buf[pos..][0..8]);
+        while (pos + 8 <= input.len) : (pos += 8) {
+            const lane = mem.readIntLittle(u64, input[pos..][0..8]);
             acc ^= round(0, lane);
             acc = rotl(u64, acc, 27) *% prime_1;
             acc +%= prime_4;
         }
 
-        if (pos + 4 <= self.buf_len) {
-            const lane = @as(u64, mem.readIntLittle(u32, self.buf[pos..][0..4]));
+        if (pos + 4 <= input.len) {
+            const lane = @as(u64, mem.readIntLittle(u32, input[pos..][0..4]));
             acc ^= lane *% prime_1;
             acc = rotl(u64, acc, 23) *% prime_2;
             acc +%= prime_3;
             pos += 4;
         }
 
-        while (pos < self.buf_len) : (pos += 1) {
-            const lane = @as(u64, self.buf[pos]);
+        while (pos < input.len) : (pos += 1) {
+            const lane = @as(u64, input[pos]);
             acc ^= lane *% prime_5;
             acc = rotl(u64, acc, 11) *% prime_1;
         }
@@ -125,12 +116,6 @@ pub const XxHash64 = struct {
         const b = a *% prime_1;
         return b +% prime_4;
     }
-
-    pub fn hash(seed: u64, input: []const u8) u64 {
-        var hasher = XxHash64.init(seed);
-        hasher.update(input);
-        return hasher.final();
-    }
 };
 
 pub const XxHash32 = struct {
@@ -140,8 +125,7 @@ pub const XxHash32 = struct {
     acc4: u32,
 
     seed: u32,
-    buf: [16]u8,
-    buf_len: usize,
+    iterator: UnalignedIterator(16),
     byte_count: usize,
 
     const prime_1 = 0x9E3779B1; // 0b10011110001101110111100110110001
@@ -157,35 +141,26 @@ pub const XxHash32 = struct {
             .acc2 = seed +% prime_2,
             .acc3 = seed,
             .acc4 = seed -% prime_1,
-            .buf = undefined,
-            .buf_len = 0,
             .byte_count = 0,
+            .iterator = .{},
         };
     }
 
     pub fn update(self: *XxHash32, input: []const u8) void {
-        if (input.len < 16 - self.buf_len) {
-            @memcpy(self.buf[self.buf_len..][0..input.len], input);
-            self.buf_len += input.len;
-            return;
-        }
+        self.iterator.update(self, processStripe, input);
+    }
 
+    pub fn final(self: *XxHash32) u32 {
+        return self.finalInternal(self.iterator.buf[0..self.iterator.buf_len]);
+    }
+
+    pub fn hash(seed: u32, input: []const u8) u32 {
+        var self = XxHash32.init(seed);
         var i: usize = 0;
-
-        if (self.buf_len > 0) {
-            i = 16 - self.buf_len;
-            @memcpy(self.buf[self.buf_len..][0..i], input[0..i]);
-            self.processStripe(&self.buf);
-            self.buf_len = 0;
-        }
-
         while (i + 16 <= input.len) : (i += 16) {
             self.processStripe(input[i..][0..16]);
         }
-
-        const remaining_bytes = input[i..];
-        @memcpy(self.buf[0..remaining_bytes.len], remaining_bytes);
-        self.buf_len = remaining_bytes.len;
+        return self.finalInternal(input[i..]);
     }
 
     inline fn processStripe(self: *XxHash32, buf: *const [16]u8) void {
@@ -202,7 +177,7 @@ pub const XxHash32 = struct {
         return b *% prime_1;
     }
 
-    pub fn final(self: *XxHash32) u32 {
+    inline fn finalInternal(self: *XxHash32, input: []const u8) u32 {
         var acc: u32 = undefined;
 
         if (self.byte_count < 16) {
@@ -212,17 +187,17 @@ pub const XxHash32 = struct {
                 rotl(u32, self.acc3, 12) +% rotl(u32, self.acc4, 18);
         }
 
-        acc = acc +% @as(u32, @intCast(self.byte_count)) +% @as(u32, @intCast(self.buf_len));
+        acc = acc +% @as(u32, @intCast(self.byte_count)) +% @as(u32, @intCast(input.len));
 
         var pos: usize = 0;
-        while (pos + 4 <= self.buf_len) : (pos += 4) {
-            const lane = mem.readIntLittle(u32, self.buf[pos..][0..4]);
+        while (pos + 4 <= input.len) : (pos += 4) {
+            const lane = mem.readIntLittle(u32, input[pos..][0..4]);
             acc +%= lane *% prime_3;
             acc = rotl(u32, acc, 17) *% prime_4;
         }
 
-        while (pos < self.buf_len) : (pos += 1) {
-            const lane = @as(u32, self.buf[pos]);
+        while (pos < input.len) : (pos += 1) {
+            const lane = @as(u32, input[pos]);
             acc +%= lane *% prime_5;
             acc = rotl(u32, acc, 11) *% prime_1;
         }
@@ -234,12 +209,6 @@ pub const XxHash32 = struct {
         acc ^= acc >> 16;
 
         return acc;
-    }
-
-    pub fn hash(seed: u32, input: []const u8) u32 {
-        var hasher = XxHash32.init(seed);
-        hasher.update(input);
-        return hasher.final();
     }
 };
 
