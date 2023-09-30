@@ -78,45 +78,6 @@ pub fn calcTwosCompLimbCount(bit_count: usize) usize {
     return std.math.divCeil(usize, bit_count, @bitSizeOf(Limb)) catch unreachable;
 }
 
-/// a + b * c + *carry, sets carry to the overflow bits
-pub fn addMulLimbWithCarry(a: Limb, b: Limb, c: Limb, carry: *Limb) Limb {
-    @setRuntimeSafety(debug_safety);
-
-    // ov1[0] = a + *carry
-    const ov1 = @addWithOverflow(a, carry.*);
-
-    // r2 = b * c
-    const bc = @as(DoubleLimb, math.mulWide(Limb, b, c));
-    const r2 = @as(Limb, @truncate(bc));
-    const c2 = @as(Limb, @truncate(bc >> limb_bits));
-
-    // ov2[0] = ov1[0] + r2
-    const ov2 = @addWithOverflow(ov1[0], r2);
-
-    // This never overflows, c1, c3 are either 0 or 1 and if both are 1 then
-    // c2 is at least <= maxInt(Limb) - 2.
-    carry.* = ov1[1] + c2 + ov2[1];
-
-    return ov2[0];
-}
-
-/// a - b * c - *carry, sets carry to the overflow bits
-fn subMulLimbWithBorrow(a: Limb, b: Limb, c: Limb, carry: *Limb) Limb {
-    // ov1[0] = a - *carry
-    const ov1 = @subWithOverflow(a, carry.*);
-
-    // r2 = b * c
-    const bc = @as(DoubleLimb, std.math.mulWide(Limb, b, c));
-    const r2 = @as(Limb, @truncate(bc));
-    const c2 = @as(Limb, @truncate(bc >> limb_bits));
-
-    // ov2[0] = ov1[0] - r2
-    const ov2 = @subWithOverflow(ov1[0], r2);
-    carry.* = ov1[1] + c2 + ov2[1];
-
-    return ov2[0];
-}
-
 /// Used to indicate either limit of a 2s-complement integer.
 pub const TwosCompIntLimit = enum {
     // The low limit, either 0x00 (unsigned) or (-)0x80 (signed) for an 8-bit integer.
@@ -4183,6 +4144,45 @@ fn llpow(r: []Limb, a: []const Limb, b: u32, tmp_limbs: []Limb) void {
             mem.swap([]Limb, &tmp1, &tmp2);
         }
     }
+}
+
+/// a + b * c + *carry, sets carry to the overflow bits
+pub fn addMulLimbWithCarry(a: Limb, b: Limb, c: Limb, carry: *Limb) Limb {
+    @setRuntimeSafety(debug_safety);
+
+    // ov1[0] = a + *carry
+    const ov1 = @addWithOverflow(a, carry.*);
+
+    // r2 = b * c
+    const bc = @as(DoubleLimb, math.mulWide(Limb, b, c));
+    const r2 = @as(Limb, @truncate(bc));
+    const c2 = @as(Limb, @truncate(bc >> limb_bits));
+
+    // ov2[0] = ov1[0] + r2
+    const ov2 = @addWithOverflow(ov1[0], r2);
+
+    // This never overflows, c1, c3 are either 0 or 1 and if both are 1 then
+    // c2 is at least <= maxInt(Limb) - 2.
+    carry.* = ov1[1] + c2 + ov2[1];
+
+    return ov2[0];
+}
+
+/// a - b * c - *carry, sets carry to the overflow bits
+fn subMulLimbWithBorrow(a: Limb, b: Limb, c: Limb, carry: *Limb) Limb {
+    // ov1[0] = a - *carry
+    const ov1 = @subWithOverflow(a, carry.*);
+
+    // r2 = b * c
+    const bc = @as(DoubleLimb, std.math.mulWide(Limb, b, c));
+    const r2 = @as(Limb, @truncate(bc));
+    const c2 = @as(Limb, @truncate(bc >> limb_bits));
+
+    // ov2[0] = ov1[0] - r2
+    const ov2 = @subWithOverflow(ov1[0], r2);
+    carry.* = ov1[1] + c2 + ov2[1];
+
+    return ov2[0];
 }
 
 // Storage must live for the lifetime of the returned value
