@@ -4563,7 +4563,7 @@ fn transCreateNodeAPInt(c: *Context, int: *const clang.APSInt) !Node {
         else => @compileError("unimplemented"),
     }
 
-    const big: math.big.int.Const = .{ .limbs = limbs, .positive = true };
+    const big: math.big.int.Const = .{ .limbs = limbs.ptr, .metadata = math.big.int.Metadata.init(.pos, limbs.len) };
     const str = big.toStringAlloc(c.arena, 10, .lower) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
     };

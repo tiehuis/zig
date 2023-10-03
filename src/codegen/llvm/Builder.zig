@@ -7567,8 +7567,8 @@ pub const Constant = enum(u32) {
                         const limbs = data.builder.constant_limbs
                             .items[item.data + Integer.limbs ..][0..extra.limbs_len];
                         const bigint = std.math.big.int.Const{
-                            .limbs = limbs,
-                            .positive = tag == .positive_integer,
+                            .limbs = limbs.ptr,
+                            .metadata = std.math.big.int.Metadata.init(if (tag == .positive_integer) .pos else .neg, limbs.len),
                         };
                         const ExpectedContents = extern struct {
                             string: [(64 * 8 / std.math.log2(10)) + 2]u8,
@@ -8817,7 +8817,7 @@ pub fn intValue(self: *Builder, ty: Type, value: anytype) Allocator.Error!Value 
 pub fn bigIntConst(self: *Builder, ty: Type, value: std.math.big.int.Const) Allocator.Error!Constant {
     try self.constant_map.ensureUnusedCapacity(self.gpa, 1);
     try self.constant_items.ensureUnusedCapacity(self.gpa, 1);
-    try self.constant_limbs.ensureUnusedCapacity(self.gpa, Constant.Integer.limbs + value.limbs.len);
+    try self.constant_limbs.ensureUnusedCapacity(self.gpa, Constant.Integer.limbs + value.len());
     if (self.useLibLlvm()) try self.llvm.constants.ensureUnusedCapacity(self.gpa, 1);
     return self.bigIntConstAssumeCapacity(ty, value);
 }
@@ -10400,9 +10400,9 @@ fn bigIntConstAssumeCapacity(
 
     const ExtraPtr = *align(@alignOf(std.math.big.Limb)) Constant.Integer;
     const Key = struct { tag: Constant.Tag, type: Type, limbs: []const std.math.big.Limb };
-    const tag: Constant.Tag = switch (canonical_value.positive) {
-        true => .positive_integer,
-        false => .negative_integer,
+    const tag: Constant.Tag = switch (canonical_value.sign()) {
+        .pos => .positive_integer,
+        .neg => .negative_integer,
     };
     const Adapter = struct {
         builder: *const Builder,
@@ -10425,7 +10425,7 @@ fn bigIntConstAssumeCapacity(
     };
 
     const gop = self.constant_map.getOrPutAssumeCapacityAdapted(
-        Key{ .tag = tag, .type = ty, .limbs = canonical_value.limbs },
+        Key{ .tag = tag, .type = ty, .limbs = canonical_value.limbs[0..canonical_value.len()] },
         Adapter{ .builder = self },
     );
     if (!gop.found_existing) {
@@ -10437,8 +10437,8 @@ fn bigIntConstAssumeCapacity(
         });
         const extra: ExtraPtr =
             @ptrCast(self.constant_limbs.addManyAsArrayAssumeCapacity(Constant.Integer.limbs));
-        extra.* = .{ .type = ty, .limbs_len = @intCast(canonical_value.limbs.len) };
-        self.constant_limbs.appendSliceAssumeCapacity(canonical_value.limbs);
+        extra.* = .{ .type = ty, .limbs_len = @intCast(canonical_value.len()) };
+        self.constant_limbs.appendSliceAssumeCapacity(canonical_value.limbs[0..canonical_value.len()]);
         if (self.useLibLlvm()) {
             const llvm_type = ty.toLlvm(self);
             if (canonical_value.to(c_longlong)) |small| {
@@ -10448,7 +10448,7 @@ fn bigIntConstAssumeCapacity(
             } else |_| {
                 const llvm_limbs = try allocator.alloc(u64, std.math.divCeil(
                     usize,
-                    if (canonical_value.positive) canonical_value.bitCountAbs() else bits,
+                    if (canonical_value.sign() == .pos) canonical_value.bitCountAbs() else bits,
                     @bitSizeOf(u64),
                 ) catch unreachable);
                 defer allocator.free(llvm_limbs);
@@ -10457,14 +10457,14 @@ fn bigIntConstAssumeCapacity(
                 for (llvm_limbs) |*result_limb| {
                     var llvm_limb: u64 = 0;
                     inline for (0..Constant.Integer.limbs) |shift| {
-                        const limb = if (limb_index < canonical_value.limbs.len)
+                        const limb = if (limb_index < canonical_value.len())
                             canonical_value.limbs[limb_index]
                         else
                             0;
                         limb_index += 1;
                         llvm_limb |= @as(u64, limb) << shift * @bitSizeOf(std.math.big.Limb);
                     }
-                    if (!canonical_value.positive) {
+                    if (canonical_value.sign() == .neg) {
                         const overflow = @subWithOverflow(borrow, llvm_limb);
                         llvm_limb = overflow[0];
                         borrow -%= overflow[1];

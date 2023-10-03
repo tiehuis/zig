@@ -8403,7 +8403,7 @@ fn numberLiteral(gz: *GenZir, ri: ResultInfo, node: Ast.Node.Index, source_node:
             };
 
             const limbs = big_int.limbs[0..big_int.len()];
-            assert(big_int.isPositive());
+            assert(big_int.sign() == .pos);
             break :big try gz.addIntBig(limbs);
         },
         .float => {

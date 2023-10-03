@@ -1130,8 +1130,7 @@ pub const DeclGen = struct {
                 var repr_val_limbs: [BigInt.calcTwosCompLimbCount(128)]BigIntLimb = undefined;
                 var repr_val_big = BigInt.Mutable{
                     .limbs = &repr_val_limbs,
-                    .len = undefined,
-                    .positive = undefined,
+                    .metadata = undefined,
                 };
 
                 switch (bits) {
@@ -7767,8 +7766,7 @@ fn formatIntLiteral(
 
         var undef_int = BigInt.Mutable{
             .limbs = undef_limbs,
-            .len = undef_limbs.len,
-            .positive = true,
+            .metadata = BigInt.Metadata.init(.pos, undef_limbs.len),
         };
         undef_int.truncate(undef_int.toConst(), data.int_info.signedness, data.int_info.bits);
         break :blk undef_int.toConst();
@@ -7781,8 +7779,7 @@ fn formatIntLiteral(
 
     var wrap = BigInt.Mutable{
         .limbs = try allocator.alloc(BigIntLimb, BigInt.calcTwosCompLimbCount(c_bits)),
-        .len = undefined,
-        .positive = undefined,
+        .metadata = undefined,
     };
     defer allocator.free(wrap.limbs);
 
@@ -7819,12 +7816,12 @@ fn formatIntLiteral(
             data.int_info.signedness == .signed and wrap.subWrap(int, one, data.int_info.signedness, c_bits))
             return writer.print("{s}_{s}", .{
                 data.cty.getStandardDefineAbbrev() orelse return writer.print("zig_{s}Int_{c}{d}", .{
-                    if (int.positive) "max" else "min", signAbbrev(data.int_info.signedness), c_bits,
+                    if (int.sign() == .pos) "max" else "min", signAbbrev(data.int_info.signedness), c_bits,
                 }),
-                if (int.positive) "MAX" else "MIN",
+                if (int.sign() == .pos) "MAX" else "MIN",
             });
 
-        if (!int.positive) try writer.writeByte('-');
+        if (int.sign() == .neg) try writer.writeByte('-');
         try data.cty.renderLiteralPrefix(writer, data.kind);
 
         const style: struct { base: u8, case: std.fmt.Case = undefined } = switch (fmt.len) {
@@ -7858,9 +7855,9 @@ fn formatIntLiteral(
     } else {
         try data.cty.renderLiteralPrefix(writer, data.kind);
         wrap.convertToTwosComplement(int, data.int_info.signedness, c_bits);
-        @memset(wrap.limbs[wrap.len..], 0);
-        wrap.len = wrap.limbs.len;
-        const limbs_per_c_limb = @divExact(wrap.len, c_limb_info.count);
+        @memset(wrap.limbs[wrap.len()..], 0);
+        wrap.setLen(wrap.limbs.len);
+        const limbs_per_c_limb = @divExact(wrap.len(), c_limb_info.count);
 
         var c_limb_int_info = std.builtin.Type.Int{
             .signedness = undefined,
@@ -7869,16 +7866,15 @@ fn formatIntLiteral(
         var c_limb_cty: CType = undefined;
 
         var limb_offset: usize = 0;
-        const most_significant_limb_i = wrap.len - limbs_per_c_limb;
-        while (limb_offset < wrap.len) : (limb_offset += limbs_per_c_limb) {
+        const most_significant_limb_i = wrap.len() - limbs_per_c_limb;
+        while (limb_offset < wrap.len()) : (limb_offset += limbs_per_c_limb) {
             const limb_i = switch (c_limb_info.endian) {
                 .little => limb_offset,
                 .big => most_significant_limb_i - limb_offset,
             };
             var c_limb_mut = BigInt.Mutable{
                 .limbs = wrap.limbs[limb_i..][0..limbs_per_c_limb],
-                .len = undefined,
-                .positive = true,
+                .metadata = BigInt.Metadata.init(.pos, limbs_per_c_limb),
             };
             c_limb_mut.normalize(limbs_per_c_limb);
 
@@ -7889,7 +7885,7 @@ fn formatIntLiteral(
                 c_limb_int_info.signedness = .signed;
                 c_limb_cty = c_limb_info.cty.toSigned();
 
-                c_limb_mut.positive = wrap.positive;
+                c_limb_mut.setSign(wrap.sign());
                 c_limb_mut.truncate(
                     c_limb_mut.toConst(),
                     .signed,

@@ -1256,8 +1256,8 @@ fn walkInstruction(
             @memcpy(std.mem.sliceAsBytes(limbs)[0..limb_bytes.len], limb_bytes);
 
             const big_int = std.math.big.int.Const{
-                .limbs = limbs,
-                .positive = true,
+                .limbs = limbs.ptr,
+                .metadata = std.math.big.int.Metadata.init(.pos, limbs.len),
             };
 
             const as_string = try big_int.toStringAlloc(self.arena, 10, .lower);

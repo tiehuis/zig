@@ -5815,7 +5815,7 @@ pub fn intBitsForValue(mod: *Module, val: Value, sign: bool) u16 {
             return Type.smallestUnsignedBits(x) + @intFromBool(sign);
         },
         .big_int => |big| {
-            if (big.positive) return @as(u16, @intCast(big.bitCountAbs() + @intFromBool(sign)));
+            if (big.sign() == .pos) return @as(u16, @intCast(big.bitCountAbs() + @intFromBool(sign)));
 
             // Zero is still a possibility, in which case unsigned is fine
             if (big.eqlZero()) return 0;

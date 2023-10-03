@@ -5575,8 +5575,8 @@ fn zirIntBig(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.
     @memcpy(mem.sliceAsBytes(limbs), limb_bytes);
 
     return Air.internedToRef((try mod.intValue_big(Type.comptime_int, .{
-        .limbs = limbs,
-        .positive = true,
+        .limbs = limbs.ptr,
+        .metadata = std.math.big.int.Metadata.init(.pos, limbs.len),
     })).toIntern());
 }
 
@@ -15618,20 +15618,20 @@ fn intRemScalar(sema: *Sema, lhs: Value, rhs: Value, scalar_ty: Type) CompileErr
     const rhs_bigint = try rhs.toBigIntAdvanced(&rhs_space, mod, sema);
     const limbs_q = try sema.arena.alloc(
         math.big.Limb,
-        lhs_bigint.limbs.len,
+        lhs_bigint.len(),
     );
     const limbs_r = try sema.arena.alloc(
         math.big.Limb,
         // TODO: consider reworking Sema to re-use Values rather than
         // always producing new Value objects.
-        rhs_bigint.limbs.len,
+        rhs_bigint.len(),
     );
     const limbs_buffer = try sema.arena.alloc(
         math.big.Limb,
-        math.big.int.calcDivLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len),
+        math.big.int.calcDivLimbsBufferLen(lhs_bigint.len(), rhs_bigint.len()),
     );
-    var result_q = math.big.int.Mutable{ .limbs = limbs_q, .positive = undefined, .len = undefined };
-    var result_r = math.big.int.Mutable{ .limbs = limbs_r, .positive = undefined, .len = undefined };
+    var result_q = math.big.int.Mutable{ .limbs = limbs_q, .metadata = undefined };
+    var result_r = math.big.int.Mutable{ .limbs = limbs_r, .metadata = undefined };
     result_q.divTrunc(&result_r, lhs_bigint, rhs_bigint, limbs_buffer);
     return mod.intValue_big(scalar_ty, result_r.toConst());
 }
@@ -38169,9 +38169,9 @@ fn intAddScalar(sema: *Sema, lhs: Value, rhs: Value, scalar_ty: Type) !Value {
     const rhs_bigint = try rhs.toBigIntAdvanced(&rhs_space, mod, sema);
     const limbs = try sema.arena.alloc(
         std.math.big.Limb,
-        @max(lhs_bigint.limbs.len, rhs_bigint.limbs.len) + 1,
+        @max(lhs_bigint.len(), rhs_bigint.len()) + 1,
     );
-    var result_bigint = std.math.big.int.Mutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+    var result_bigint = std.math.big.int.Mutable{ .limbs = limbs, .metadata = undefined };
     result_bigint.add(lhs_bigint, rhs_bigint);
     return mod.intValue_big(scalar_ty, result_bigint.toConst());
 }
@@ -38259,9 +38259,9 @@ fn intSubScalar(sema: *Sema, lhs: Value, rhs: Value, scalar_ty: Type) !Value {
     const rhs_bigint = try rhs.toBigIntAdvanced(&rhs_space, mod, sema);
     const limbs = try sema.arena.alloc(
         std.math.big.Limb,
-        @max(lhs_bigint.limbs.len, rhs_bigint.limbs.len) + 1,
+        @max(lhs_bigint.len(), rhs_bigint.len()) + 1,
     );
-    var result_bigint = std.math.big.int.Mutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+    var result_bigint = std.math.big.int.Mutable{ .limbs = limbs, .metadata = undefined };
     result_bigint.sub(lhs_bigint, rhs_bigint);
     return mod.intValue_big(scalar_ty, result_bigint.toConst());
 }
@@ -38338,7 +38338,7 @@ fn intSubWithOverflowScalar(
         std.math.big.Limb,
         std.math.big.int.calcTwosCompLimbCount(info.bits),
     );
-    var result_bigint = std.math.big.int.Mutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+    var result_bigint = std.math.big.int.Mutable{ .limbs = limbs, .metadata = undefined };
     const overflowed = result_bigint.subWrap(lhs_bigint, rhs_bigint, info.signedness, info.bits);
     const wrapped_result = try mod.intValue_big(ty, result_bigint.toConst());
     return Value.OverflowArithmeticResult{
@@ -38391,7 +38391,8 @@ fn float128IntPartToBigInt(
     };
 
     // The float is reduced in rational.setFloat, so we assert that denominator is equal to one
-    const big_one = std.math.big.int.Const{ .limbs = &.{1}, .positive = true };
+    const one_limbs: []const std.math.big.Limb = &.{1};
+    const big_one = std.math.big.int.Const{ .limbs = one_limbs.ptr, .metadata = std.math.big.int.Metadata.init(.pos, 1) };
     assert(rational.q.toConst().eqlAbs(big_one));
 
     if (is_negative) {
@@ -38592,7 +38593,7 @@ fn intAddWithOverflowScalar(
         std.math.big.Limb,
         std.math.big.int.calcTwosCompLimbCount(info.bits),
     );
-    var result_bigint = std.math.big.int.Mutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+    var result_bigint = std.math.big.int.Mutable{ .limbs = limbs, .metadata = undefined };
     const overflowed = result_bigint.addWrap(lhs_bigint, rhs_bigint, info.signedness, info.bits);
     const result = try mod.intValue_big(ty, result_bigint.toConst());
     return Value.OverflowArithmeticResult{

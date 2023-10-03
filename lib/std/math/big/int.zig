@@ -115,7 +115,7 @@ pub const Metadata = enum(isize) {
     }
 
     pub fn sign(m: Metadata) Sign {
-        return @enumFromInt(@intFromEnum(m) >> (@bitSizeOf(Metadata) - 1));
+        return if (@intFromEnum(m) >= 0) .pos else .neg;
     }
 
     pub fn withLen(m: Metadata, new_len: usize) Metadata {
@@ -133,7 +133,7 @@ pub const Mutable = struct {
     ///
     /// * Little-endian ordered
     /// * limbs.len >= 1
-    /// * Zero is represented as TODO
+    /// * Zero is represented as metadata.sign = .pos and metadata.len = 1
     ///
     /// Accessing limbs directly should be avoided.
     /// These are allocated limbs; the `len` field tells the valid range.
@@ -2245,7 +2245,7 @@ pub const Const = struct {
 
         const biggest: Const = .{
             .limbs = &([1]Limb{comptime math.maxInt(Limb)} ** available_len),
-            .metadata = Metadata.init(.neg, available_len),
+            .metadata = comptime Metadata.init(.neg, available_len),
         };
         var buf: [biggest.sizeInBaseUpperBound(base)]u8 = undefined;
         const out_len = self.toString(&buf, base, case, &limbs);
@@ -2524,7 +2524,7 @@ pub const Const = struct {
     pub fn ctz(a: Const, bits: Limb) Limb {
         // Limbs are stored in little-endian order.
         var result: Limb = 0;
-        for (a.limbs) |limb| {
+        for (a.limbs[0..a.len()]) |limb| {
             const limb_tz = @ctz(limb);
             result += limb_tz;
             if (limb_tz != @sizeOf(Limb) * 8) break;
@@ -2550,7 +2550,7 @@ pub const Managed = struct {
     ///
     /// * Little-endian ordered
     /// * limbs.len >= 1
-    /// * Zero is represent as Managed.len() == 1 with limbs[0] == 0.
+    /// * Zero is represented as Managed.len() == 1 with limbs[0] == 0.
     ///
     /// Accessing limbs directly should be avoided.
     limbs: []Limb,

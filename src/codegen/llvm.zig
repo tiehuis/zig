@@ -2009,15 +2009,15 @@ pub const Object = struct {
                     else
                         std.math.big.int.Mutable.init(&bigint_space.limbs, i).toConst();
 
-                    if (bigint.limbs.len == 1) {
+                    if (bigint.len() == 1) {
                         enumerators[i] = dib.createEnumerator(field_name_z, bigint.limbs[0], int_info.signedness == .unsigned);
                         continue;
                     }
                     if (@sizeOf(usize) == @sizeOf(u64)) {
                         enumerators[i] = dib.createEnumerator2(
                             field_name_z,
-                            @intCast(bigint.limbs.len),
-                            bigint.limbs.ptr,
+                            @intCast(bigint.len()),
+                            bigint.limbs,
                             int_info.bits,
                             int_info.signedness == .unsigned,
                         );

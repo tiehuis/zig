@@ -3216,7 +3216,7 @@ fn activeIntBits(self: *Self, dst_air: Air.Inst.Ref) u16 {
         var space: Value.BigIntSpace = undefined;
         const src_int = Value.fromInterned(ip_index).toBigInt(&space, mod);
         return @as(u16, @intCast(src_int.bitCountTwosComp())) +
-            @intFromBool(src_int.positive and dst_info.signedness == .signed);
+            @intFromBool(src_int.sign() == .pos and dst_info.signedness == .signed);
     }
     return dst_info.bits;
 }

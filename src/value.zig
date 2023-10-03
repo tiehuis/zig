@@ -1202,7 +1202,7 @@ pub const Value = struct {
     pub fn toFloat(val: Value, comptime T: type, mod: *Module) T {
         return switch (mod.intern_pool.indexToKey(val.toIntern())) {
             .int => |int| switch (int.storage) {
-                .big_int => |big_int| @floatCast(bigIntToFloat(big_int.limbs, big_int.positive)),
+                .big_int => |big_int| @floatCast(bigIntToFloat(big_int.limbs[0..big_int.len()], big_int.sign())),
                 inline .u64, .i64 => |x| {
                     if (T == f80) {
                         @panic("TODO we can't lower this properly on non-x86 llvm backend yet");
@@ -1220,7 +1220,7 @@ pub const Value = struct {
     }
 
     /// TODO move this to std lib big int code
-    fn bigIntToFloat(limbs: []const std.math.big.Limb, positive: bool) f128 {
+    fn bigIntToFloat(limbs: []const std.math.big.Limb, sign: std.math.big.int.Sign) f128 {
         if (limbs.len == 0) return 0;
 
         const base = std.math.maxInt(std.math.big.Limb) + 1;
@@ -1231,11 +1231,10 @@ pub const Value = struct {
             const limb: f128 = @as(f128, @floatFromInt(limbs[i]));
             result = @mulAdd(f128, base, result, limb);
         }
-        if (positive) {
-            return result;
-        } else {
-            return -result;
-        }
+        return switch (sign) {
+            .pos => result,
+            .neg => -result,
+        };
     }
 
     pub fn clz(val: Value, ty: Type, mod: *Module) u64 {
@@ -1266,7 +1265,7 @@ pub const Value = struct {
             std.math.big.Limb,
             std.math.big.int.calcTwosCompLimbCount(info.bits),
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.bitReverse(operand_bigint, info.signedness, info.bits);
 
         return mod.intValue_big(ty, result_bigint.toConst());
@@ -1285,7 +1284,7 @@ pub const Value = struct {
             std.math.big.Limb,
             std.math.big.int.calcTwosCompLimbCount(info.bits),
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.byteSwap(operand_bigint, info.signedness, info.bits / 8);
 
         return mod.intValue_big(ty, result_bigint.toConst());
@@ -1955,7 +1954,7 @@ pub const Value = struct {
             .undef => try mod.undefValue(float_ty),
             .int => |int| switch (int.storage) {
                 .big_int => |big_int| {
-                    const float = bigIntToFloat(big_int.limbs, big_int.positive);
+                    const float = bigIntToFloat(big_int.limbs[0..big_int.len()], big_int.sign());
                     return mod.floatValue(float_ty, float);
                 },
                 inline .u64, .i64 => |x| floatFromIntInner(x, float_ty, mod),
@@ -2049,7 +2048,7 @@ pub const Value = struct {
             std.math.big.Limb,
             std.math.big.int.calcTwosCompLimbCount(info.bits),
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.addSat(lhs_bigint, rhs_bigint, info.signedness, info.bits);
         return mod.intValue_big(ty, result_bigint.toConst());
     }
@@ -2099,7 +2098,7 @@ pub const Value = struct {
             std.math.big.Limb,
             std.math.big.int.calcTwosCompLimbCount(info.bits),
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.subSat(lhs_bigint, rhs_bigint, info.signedness, info.bits);
         return mod.intValue_big(ty, result_bigint.toConst());
     }
@@ -2152,12 +2151,12 @@ pub const Value = struct {
         const rhs_bigint = rhs.toBigInt(&rhs_space, mod);
         const limbs = try arena.alloc(
             std.math.big.Limb,
-            lhs_bigint.limbs.len + rhs_bigint.limbs.len,
+            lhs_bigint.len() + rhs_bigint.len(),
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         const limbs_buffer = try arena.alloc(
             std.math.big.Limb,
-            std.math.big.int.calcMulLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len, 1),
+            std.math.big.int.calcMulLimbsBufferLen(lhs_bigint.len(), rhs_bigint.len(), 1),
         );
         result_bigint.mul(lhs_bigint, rhs_bigint, limbs_buffer, arena);
 
@@ -2264,13 +2263,13 @@ pub const Value = struct {
             @max(
                 // For the saturate
                 std.math.big.int.calcTwosCompLimbCount(info.bits),
-                lhs_bigint.limbs.len + rhs_bigint.limbs.len,
+                lhs_bigint.len() + rhs_bigint.len(),
             ),
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         const limbs_buffer = try arena.alloc(
             std.math.big.Limb,
-            std.math.big.int.calcMulLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len, 1),
+            std.math.big.int.calcMulLimbsBufferLen(lhs_bigint.len(), rhs_bigint.len(), 1),
         );
         result_bigint.mul(lhs_bigint, rhs_bigint, limbs_buffer, arena);
         result_bigint.saturate(result_bigint.toConst(), info.signedness, info.bits);
@@ -2338,7 +2337,7 @@ pub const Value = struct {
             std.math.big.int.calcTwosCompLimbCount(info.bits),
         );
 
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.bitNotWrap(val_bigint, info.signedness, info.bits);
         return mod.intValue_big(ty, result_bigint.toConst());
     }
@@ -2375,9 +2374,9 @@ pub const Value = struct {
         const limbs = try arena.alloc(
             std.math.big.Limb,
             // + 1 for negatives
-            @max(lhs_bigint.limbs.len, rhs_bigint.limbs.len) + 1,
+            @max(lhs_bigint.len(), rhs_bigint.len()) + 1,
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.bitAnd(lhs_bigint, rhs_bigint);
         return mod.intValue_big(ty, result_bigint.toConst());
     }
@@ -2441,9 +2440,9 @@ pub const Value = struct {
         const rhs_bigint = rhs.toBigInt(&rhs_space, mod);
         const limbs = try arena.alloc(
             std.math.big.Limb,
-            @max(lhs_bigint.limbs.len, rhs_bigint.limbs.len),
+            @max(lhs_bigint.len(), rhs_bigint.len()),
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.bitOr(lhs_bigint, rhs_bigint);
         return mod.intValue_big(ty, result_bigint.toConst());
     }
@@ -2480,9 +2479,9 @@ pub const Value = struct {
         const limbs = try arena.alloc(
             std.math.big.Limb,
             // + 1 for negatives
-            @max(lhs_bigint.limbs.len, rhs_bigint.limbs.len) + 1,
+            @max(lhs_bigint.len(), rhs_bigint.len()) + 1,
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.bitXor(lhs_bigint, rhs_bigint);
         return mod.intValue_big(ty, result_bigint.toConst());
     }
@@ -2541,18 +2540,18 @@ pub const Value = struct {
         const rhs_bigint = rhs.toBigInt(&rhs_space, mod);
         const limbs_q = try allocator.alloc(
             std.math.big.Limb,
-            lhs_bigint.limbs.len,
+            lhs_bigint.len(),
         );
         const limbs_r = try allocator.alloc(
             std.math.big.Limb,
-            rhs_bigint.limbs.len,
+            rhs_bigint.len(),
         );
         const limbs_buffer = try allocator.alloc(
             std.math.big.Limb,
-            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len),
+            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.len(), rhs_bigint.len()),
         );
-        var result_q = BigIntMutable{ .limbs = limbs_q, .positive = undefined, .len = undefined };
-        var result_r = BigIntMutable{ .limbs = limbs_r, .positive = undefined, .len = undefined };
+        var result_q = BigIntMutable{ .limbs = limbs_q, .metadata = undefined };
+        var result_r = BigIntMutable{ .limbs = limbs_r, .metadata = undefined };
         result_q.divTrunc(&result_r, lhs_bigint, rhs_bigint, limbs_buffer);
         if (ty.toIntern() != .comptime_int_type) {
             const info = ty.intInfo(mod);
@@ -2589,18 +2588,18 @@ pub const Value = struct {
         const rhs_bigint = rhs.toBigInt(&rhs_space, mod);
         const limbs_q = try allocator.alloc(
             std.math.big.Limb,
-            lhs_bigint.limbs.len,
+            lhs_bigint.len(),
         );
         const limbs_r = try allocator.alloc(
             std.math.big.Limb,
-            rhs_bigint.limbs.len,
+            rhs_bigint.len(),
         );
         const limbs_buffer = try allocator.alloc(
             std.math.big.Limb,
-            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len),
+            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.len(), rhs_bigint.len()),
         );
-        var result_q = BigIntMutable{ .limbs = limbs_q, .positive = undefined, .len = undefined };
-        var result_r = BigIntMutable{ .limbs = limbs_r, .positive = undefined, .len = undefined };
+        var result_q = BigIntMutable{ .limbs = limbs_q, .metadata = undefined };
+        var result_r = BigIntMutable{ .limbs = limbs_r, .metadata = undefined };
         result_q.divFloor(&result_r, lhs_bigint, rhs_bigint, limbs_buffer);
         return mod.intValue_big(ty, result_q.toConst());
     }
@@ -2631,18 +2630,18 @@ pub const Value = struct {
         const rhs_bigint = rhs.toBigInt(&rhs_space, mod);
         const limbs_q = try allocator.alloc(
             std.math.big.Limb,
-            lhs_bigint.limbs.len,
+            lhs_bigint.len(),
         );
         const limbs_r = try allocator.alloc(
             std.math.big.Limb,
-            rhs_bigint.limbs.len,
+            rhs_bigint.len(),
         );
         const limbs_buffer = try allocator.alloc(
             std.math.big.Limb,
-            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len),
+            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.len(), rhs_bigint.len()),
         );
-        var result_q = BigIntMutable{ .limbs = limbs_q, .positive = undefined, .len = undefined };
-        var result_r = BigIntMutable{ .limbs = limbs_r, .positive = undefined, .len = undefined };
+        var result_q = BigIntMutable{ .limbs = limbs_q, .metadata = undefined };
+        var result_r = BigIntMutable{ .limbs = limbs_r, .metadata = undefined };
         result_q.divFloor(&result_r, lhs_bigint, rhs_bigint, limbs_buffer);
         return mod.intValue_big(ty, result_r.toConst());
     }
@@ -2804,12 +2803,12 @@ pub const Value = struct {
         const rhs_bigint = rhs.toBigInt(&rhs_space, mod);
         const limbs = try allocator.alloc(
             std.math.big.Limb,
-            lhs_bigint.limbs.len + rhs_bigint.limbs.len,
+            lhs_bigint.len() + rhs_bigint.len(),
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         const limbs_buffer = try allocator.alloc(
             std.math.big.Limb,
-            std.math.big.int.calcMulLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len, 1),
+            std.math.big.int.calcMulLimbsBufferLen(lhs_bigint.len(), rhs_bigint.len(), 1),
         );
         defer allocator.free(limbs_buffer);
         result_bigint.mul(lhs_bigint, rhs_bigint, limbs_buffer, allocator);
@@ -2874,7 +2873,7 @@ pub const Value = struct {
             std.math.big.Limb,
             std.math.big.int.calcTwosCompLimbCount(bits),
         );
-        var result_bigint = BigIntMutable{ .limbs = limbs, .positive = undefined, .len = undefined };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
 
         result_bigint.truncate(val_bigint, signedness, bits);
         return mod.intValue_big(ty, result_bigint.toConst());
@@ -2905,13 +2904,9 @@ pub const Value = struct {
         const shift = @as(usize, @intCast(rhs.toUnsignedInt(mod)));
         const limbs = try allocator.alloc(
             std.math.big.Limb,
-            lhs_bigint.limbs.len + (shift / (@sizeOf(std.math.big.Limb) * 8)) + 1,
+            lhs_bigint.len() + (shift / (@sizeOf(std.math.big.Limb) * 8)) + 1,
         );
-        var result_bigint = BigIntMutable{
-            .limbs = limbs,
-            .positive = undefined,
-            .len = undefined,
-        };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.shiftLeft(lhs_bigint, shift);
         if (ty.toIntern() != .comptime_int_type) {
             const int_info = ty.intInfo(mod);
@@ -2967,13 +2962,9 @@ pub const Value = struct {
         const shift = @as(usize, @intCast(rhs.toUnsignedInt(mod)));
         const limbs = try allocator.alloc(
             std.math.big.Limb,
-            lhs_bigint.limbs.len + (shift / (@sizeOf(std.math.big.Limb) * 8)) + 1,
+            lhs_bigint.len() + (shift / (@sizeOf(std.math.big.Limb) * 8)) + 1,
         );
-        var result_bigint = BigIntMutable{
-            .limbs = limbs,
-            .positive = undefined,
-            .len = undefined,
-        };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.shiftLeft(lhs_bigint, shift);
         const overflowed = !result_bigint.toConst().fitsInTwosComp(info.signedness, info.bits);
         if (overflowed) {
@@ -3026,11 +3017,7 @@ pub const Value = struct {
             std.math.big.Limb,
             std.math.big.int.calcTwosCompLimbCount(info.bits) + 1,
         );
-        var result_bigint = BigIntMutable{
-            .limbs = limbs,
-            .positive = undefined,
-            .len = undefined,
-        };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.shiftLeftSat(lhs_bigint, shift, info.signedness, info.bits);
         return mod.intValue_big(ty, result_bigint.toConst());
     }
@@ -3095,11 +3082,11 @@ pub const Value = struct {
         const lhs_bigint = lhs.toBigInt(&lhs_space, mod);
         const shift = @as(usize, @intCast(rhs.toUnsignedInt(mod)));
 
-        const result_limbs = lhs_bigint.limbs.len -| (shift / (@sizeOf(std.math.big.Limb) * 8));
+        const result_limbs = lhs_bigint.len() -| (shift / (@sizeOf(std.math.big.Limb) * 8));
         if (result_limbs == 0) {
             // The shift is enough to remove all the bits from the number, which means the
             // result is 0 or -1 depending on the sign.
-            if (lhs_bigint.positive) {
+            if (lhs_bigint.sign() == .pos) {
                 return mod.intValue(ty, 0);
             } else {
                 return mod.intValue(ty, -1);
@@ -3110,11 +3097,7 @@ pub const Value = struct {
             std.math.big.Limb,
             result_limbs,
         );
-        var result_bigint = BigIntMutable{
-            .limbs = limbs,
-            .positive = undefined,
-            .len = undefined,
-        };
+        var result_bigint = BigIntMutable{ .limbs = limbs, .metadata = undefined };
         result_bigint.shiftRight(lhs_bigint, shift);
         return mod.intValue_big(ty, result_bigint.toConst());
     }

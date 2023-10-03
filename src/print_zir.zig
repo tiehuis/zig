@@ -763,8 +763,8 @@ const Writer = struct {
 
         @memcpy(mem.sliceAsBytes(limbs), limb_bytes);
         const big_int: std.math.big.int.Const = .{
-            .limbs = limbs,
-            .positive = true,
+            .limbs = limbs.ptr,
+            .metadata = std.math.big.int.Metadata.init(.pos, limbs.len),
         };
         const as_string = try big_int.toStringAlloc(self.gpa, 10, .lower);
         defer self.gpa.free(as_string);

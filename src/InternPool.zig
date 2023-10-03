@@ -91,6 +91,7 @@ const assert = std.debug.assert;
 const BigIntConst = std.math.big.int.Const;
 const BigIntMutable = std.math.big.int.Mutable;
 const Cache = std.Build.Cache;
+const BigIntMetadata = std.math.big.int.Metadata;
 const Limb = std.math.big.Limb;
 const Hash = std.hash.Wyhash;
 
@@ -1328,8 +1329,8 @@ pub const Key = union(enum) {
                         const big_int = int.storage.toBigInt(&buffer);
 
                         std.hash.autoHash(&hasher, int.ty);
-                        std.hash.autoHash(&hasher, big_int.positive);
-                        for (big_int.limbs) |limb| std.hash.autoHash(&hasher, limb);
+                        std.hash.autoHash(&hasher, big_int.sign() == .pos);
+                        for (big_int.limbs[0..big_int.len()]) |limb| std.hash.autoHash(&hasher, limb);
                     },
                     .lazy_align, .lazy_size => |lazy_ty| {
                         std.hash.autoHash(
@@ -4548,8 +4549,8 @@ fn indexToKeyBigInt(ip: *const InternPool, limb_index: u32, positive: bool) Key 
     return .{ .int = .{
         .ty = int_info.ty,
         .storage = .{ .big_int = .{
-            .limbs = ip.limbSlice(Int, limb_index, int_info.limbs_len),
-            .positive = positive,
+            .limbs = ip.limbSlice(Int, limb_index, int_info.limbs_len).ptr,
+            .metadata = BigIntMetadata.init(if (positive) .pos else .neg, int_info.limbs_len),
         } },
     } };
 }
@@ -5059,8 +5060,8 @@ pub fn get(ip: *InternPool, gpa: Allocator, key: Key) Allocator.Error!Index {
                         return @enumFromInt(ip.items.len - 1);
                     } else |_| {}
 
-                    const tag: Tag = if (big_int.positive) .int_positive else .int_negative;
-                    try addInt(ip, gpa, int.ty, tag, big_int.limbs);
+                    const tag: Tag = if (big_int.sign() == .pos) .int_positive else .int_negative;
+                    try addInt(ip, gpa, int.ty, tag, big_int.limbs[0..big_int.len()]);
                 },
                 inline .u64, .i64 => |x| {
                     if (std.math.cast(u32, x)) |casted| {
@@ -5076,8 +5077,8 @@ pub fn get(ip: *InternPool, gpa: Allocator, key: Key) Allocator.Error!Index {
 
                     var buf: [2]Limb = undefined;
                     const big_int = BigIntMutable.init(&buf, x).toConst();
-                    const tag: Tag = if (big_int.positive) .int_positive else .int_negative;
-                    try addInt(ip, gpa, int.ty, tag, big_int.limbs);
+                    const tag: Tag = if (big_int.sign() == .pos) .int_positive else .int_negative;
+                    try addInt(ip, gpa, int.ty, tag, big_int.limbs[0..big_int.len()]);
                 },
                 .lazy_align, .lazy_size => unreachable,
             }
@@ -7137,14 +7138,15 @@ pub fn getCoercedInts(ip: *InternPool, gpa: Allocator, int: Key.Int, new_ty: Ind
     const new_storage: Key.Int.Storage = switch (int.storage) {
         .u64, .i64, .lazy_align, .lazy_size => int.storage,
         .big_int => |big_int| storage: {
-            const positive = big_int.positive;
-            const limbs = ip.limbsSliceToIndex(big_int.limbs);
+            const new_sign = big_int.sign();
+            const limbs = ip.limbsSliceToIndex(big_int.limbs[0..big_int.len()]);
             // This line invalidates the limbs slice, but the indexes computed in the
             // previous line are still correct.
-            try reserveLimbs(ip, gpa, @typeInfo(Int).Struct.fields.len + big_int.limbs.len);
+            try reserveLimbs(ip, gpa, @typeInfo(Int).Struct.fields.len + big_int.len());
+            const new_limbs = ip.limbsIndexToSlice(limbs);
             break :storage .{ .big_int = .{
-                .limbs = ip.limbsIndexToSlice(limbs),
-                .positive = positive,
+                .limbs = new_limbs.ptr,
+                .metadata = BigIntMetadata.init(new_sign, new_limbs.len),
             } };
         },
     };
