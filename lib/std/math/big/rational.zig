@@ -6,6 +6,8 @@ const mem = std.mem;
 const testing = std.testing;
 const Allocator = mem.Allocator;
 
+const Metadata = std.math.big.int.Metadata;
+const Sign = std.math.big.int.Sign;
 const Limb = std.math.big.Limb;
 const DoubleLimb = std.math.big.DoubleLimb;
 const Int = std.math.big.int.Managed;
@@ -104,7 +106,7 @@ pub const Rational = struct {
         if (point) |i| {
             try self.p.setString(10, str[0..i]);
 
-            const base = IntConst{ .limbs = &[_]Limb{10}, .positive = true };
+            const base = IntConst{ .limbs = &[_]Limb{10}, .metadata = Metadata.init(.pos, 1) };
             var local_buf: [@sizeOf(Limb) * Int.default_capacity]u8 align(@alignOf(Limb)) = undefined;
             var fba = std.heap.FixedBufferAllocator.init(&local_buf);
             const base_managed = try base.toManaged(fba.allocator());
@@ -174,7 +176,7 @@ pub const Rational = struct {
         }
 
         try self.p.set(mantissa);
-        self.p.setSign(f >= 0);
+        self.p.setSign(if (f >= 0) .pos else .neg);
 
         try self.q.set(1);
         if (shift >= 0) {
@@ -282,7 +284,7 @@ pub const Rational = struct {
             exact = false;
         }
 
-        return if (self.p.isPositive()) f else -f;
+        return if (self.p.sign() == .pos) f else -f;
     }
 
     /// Set a rational from an integer ratio.
@@ -290,8 +292,8 @@ pub const Rational = struct {
         try self.p.set(p);
         try self.q.set(q);
 
-        self.p.setSign(@intFromBool(self.p.isPositive()) ^ @intFromBool(self.q.isPositive()) == 0);
-        self.q.setSign(true);
+        self.p.setSign(Sign.fromBool(@intFromBool(self.p.sign() == .pos) ^ @intFromBool(self.q.sign() == .pos) == 0));
+        self.q.setSign(.pos);
 
         try self.reduce();
 
@@ -311,8 +313,8 @@ pub const Rational = struct {
         try self.p.copy(a.toConst());
         try self.q.copy(b.toConst());
 
-        self.p.setSign(@intFromBool(self.p.isPositive()) ^ @intFromBool(self.q.isPositive()) == 0);
-        self.q.setSign(true);
+        self.p.setSign(Sign.fromBool(@intFromBool(self.p.sign() == .pos) ^ @intFromBool(self.q.sign() == .pos) == 0));
+        self.q.setSign(.pos);
 
         try self.reduce();
     }
@@ -454,12 +456,12 @@ pub const Rational = struct {
         var a = try Int.init(r.p.allocator);
         defer a.deinit();
 
-        const sign = r.p.isPositive();
+        const sign = r.p.sign();
         r.p.abs();
         try a.gcd(&r.p, &r.q);
         r.p.setSign(sign);
 
-        const one = IntConst{ .limbs = &[_]Limb{1}, .positive = true };
+        const one = IntConst{ .limbs = &[_]Limb{1}, .metadata = Metadata.init(.pos, 1) };
         if (a.toConst().order(one) != .eq) {
             var unused = try Int.init(r.p.allocator);
             defer unused.deinit();
