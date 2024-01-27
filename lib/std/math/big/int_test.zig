@@ -5,6 +5,7 @@ const testing = std.testing;
 const Managed = std.math.big.int.Managed;
 const Mutable = std.math.big.int.Mutable;
 const Limb = std.math.big.Limb;
+const Metadata = std.math.big.int.Metadata;
 const SignedLimb = std.math.big.SignedLimb;
 const DoubleLimb = std.math.big.DoubleLimb;
 const SignedDoubleLimb = std.math.big.SignedDoubleLimb;
@@ -38,7 +39,7 @@ test "big.int comptime_int set negative" {
     defer a.deinit();
 
     try testing.expect(a.limbs[0] == 10);
-    try testing.expect(a.isPositive() == false);
+    try testing.expect(a.sign() == .neg);
 }
 
 test "big.int int set unaligned small" {
@@ -46,7 +47,7 @@ test "big.int int set unaligned small" {
     defer a.deinit();
 
     try testing.expect(a.limbs[0] == 45);
-    try testing.expect(a.isPositive() == true);
+    try testing.expect(a.sign() == .pos);
 }
 
 test "big.int comptime_int to" {
@@ -178,7 +179,7 @@ test "big.int bitcount + sizeInBaseUpperBound" {
     try a.shiftLeft(&a, 5000);
     try testing.expect(a.bitCountAbs() == 5032);
     try testing.expect(a.sizeInBaseUpperBound(2) >= 5032);
-    a.setSign(false);
+    a.setSign(.neg);
 
     try testing.expect(a.bitCountAbs() == 5032);
     try testing.expect(a.sizeInBaseUpperBound(2) >= 5033);
@@ -1006,7 +1007,7 @@ test "big.int mul large" {
     for (a.limbs) |*p| {
         p.* = std.math.maxInt(Limb);
     }
-    a.setMetadata(true, 50);
+    a.metadata = Metadata.init(.pos, 50);
 
     try b.mul(&a, &a);
     try c.sqr(&a);
@@ -1091,7 +1092,7 @@ test "big.int mulWrap large" {
     for (a.limbs) |*p| {
         p.* = std.math.maxInt(Limb);
     }
-    a.setMetadata(true, 50);
+    a.metadata = Metadata.init(.pos, 50);
 
     const testbits = @bitSizeOf(Limb) * 64 + 45;
 
@@ -2863,7 +2864,7 @@ test "big int write twos complement +/- zero" {
     try testing.expect(std.mem.eql(u8, buffer1, &(([_]u8{0} ** 16))));
 
     @memset(buffer1, 0xaa);
-    m.positive = false;
+    m.setSign(.neg);
 
     // Test negative zero
 
@@ -3158,13 +3159,14 @@ test "big.int eql zeroes #17296" {
 }
 
 test "big.int.Const.order 0 == -0" {
+    const zero: []const Limb = &.{0};
     const a = std.math.big.int.Const{
-        .limbs = &.{0},
-        .positive = true,
+        .limbs = zero.ptr,
+        .metadata = Metadata.init(.pos, 1),
     };
     const b = std.math.big.int.Const{
-        .limbs = &.{0},
-        .positive = false,
+        .limbs = zero.ptr,
+        .metadata = Metadata.init(.neg, 1),
     };
     try std.testing.expectEqual(std.math.Order.eq, a.order(b));
 }

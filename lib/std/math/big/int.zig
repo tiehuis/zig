@@ -87,24 +87,73 @@ pub const TwosCompIntLimit = enum {
     max,
 };
 
+pub const Sign = enum(u1) {
+    pos,
+    neg,
+
+    pub fn negate(s: Sign) Sign {
+        return @enumFromInt(@intFromEnum(s) ^ 1);
+    }
+
+    // Returns a sign given a bool which is true if positive, false if negative
+    pub fn fromBool(is_positive: bool) Sign {
+        return @enumFromInt(@intFromBool(!is_positive));
+    }
+};
+
+pub const Metadata = enum(isize) {
+    zero = 0,
+    _,
+
+    pub fn init(new_sign: Sign, new_len: usize) Metadata {
+        const signed_len: isize = @intCast(new_len);
+        return @enumFromInt(if (new_sign == .pos) signed_len else -signed_len);
+    }
+
+    pub fn len(m: Metadata) usize {
+        return @intCast(@abs(@as(isize, @intFromEnum(m))));
+    }
+
+    pub fn sign(m: Metadata) Sign {
+        return @enumFromInt(@intFromEnum(m) >> (@bitSizeOf(Metadata) - 1));
+    }
+
+    pub fn withLen(m: Metadata, new_len: usize) Metadata {
+        return init(m.sign(), new_len);
+    }
+
+    pub fn withSign(m: Metadata, new_sign: Sign) Metadata {
+        return init(new_sign, m.len());
+    }
+};
+
 /// A arbitrary-precision big integer, with a fixed set of mutable limbs.
 pub const Mutable = struct {
     /// Raw digits. These are:
     ///
     /// * Little-endian ordered
     /// * limbs.len >= 1
-    /// * Zero is represented as limbs.len == 1 with limbs[0] == 0.
+    /// * Zero is represented as TODO
     ///
     /// Accessing limbs directly should be avoided.
     /// These are allocated limbs; the `len` field tells the valid range.
     limbs: []Limb,
-    len: usize,
-    positive: bool,
+    metadata: Metadata,
+
+    /// Returns the number of limbs used to represent the current value.
+    pub fn len(self: Mutable) usize {
+        return self.metadata.len();
+    }
+
+    /// Returns the sign of the current value.
+    pub fn sign(self: Mutable) Sign {
+        return self.metadata.sign();
+    }
 
     pub fn toConst(self: Mutable) Const {
         return .{
-            .limbs = self.limbs[0..self.len],
-            .positive = self.positive,
+            .limbs = self.limbs.ptr,
+            .metadata = self.metadata,
         };
     }
 
@@ -119,10 +168,7 @@ pub const Mutable = struct {
         return .{
             .allocator = allocator,
             .limbs = self.limbs,
-            .metadata = if (self.positive)
-                self.len & ~Managed.sign_bit
-            else
-                self.len | Managed.sign_bit,
+            .metadata = self.metadata,
         };
     }
 
@@ -133,8 +179,7 @@ pub const Mutable = struct {
         limbs_buffer[0] = 0;
         var self: Mutable = .{
             .limbs = limbs_buffer,
-            .len = 1,
-            .positive = true,
+            .metadata = Metadata.init(.pos, 1),
         };
         self.set(value);
         return self;
@@ -143,11 +188,10 @@ pub const Mutable = struct {
     /// Copies the value of a Const to an existing Mutable so that they both have the same value.
     /// Asserts the value fits in the limbs buffer.
     pub fn copy(self: *Mutable, other: Const) void {
-        if (self.limbs.ptr != other.limbs.ptr) {
-            @memcpy(self.limbs[0..other.limbs.len], other.limbs[0..other.limbs.len]);
+        if (self.limbs.ptr != other.limbs) {
+            @memcpy(self.limbs[0..other.len()], other.limbs[0..other.len()]);
         }
-        self.positive = other.positive;
-        self.len = other.limbs.len;
+        self.metadata = other.metadata;
     }
 
     /// Efficiently swap an Mutable with another. This swaps the limb pointers and a full copy is not
@@ -157,10 +201,10 @@ pub const Mutable = struct {
     }
 
     pub fn dump(self: Mutable) void {
-        for (self.limbs[0..self.len]) |limb| {
+        for (self.limbs[0..self.len()]) |limb| {
             std.debug.print("{x} ", .{limb});
         }
-        std.debug.print("capacity={} positive={}\n", .{ self.limbs.len, self.positive });
+        std.debug.print("capacity={} positive={}\n", .{ self.limbs.len, self.sign() == .pos });
     }
 
     /// Clones an Mutable and returns a new Mutable with the same value. The new Mutable is a deep copy and
@@ -175,13 +219,21 @@ pub const Mutable = struct {
         };
     }
 
+    pub fn setLen(self: *Mutable, new_len: usize) void {
+        self.metadata = self.metadata.withLen(new_len);
+    }
+
+    pub fn setSign(self: *Mutable, new_sign: Sign) void {
+        self.metadata = self.metadata.withSign(new_sign);
+    }
+
     pub fn negate(self: *Mutable) void {
-        self.positive = !self.positive;
+        self.setSign(self.sign().negate());
     }
 
     /// Modify to become the absolute value
     pub fn abs(self: *Mutable) void {
-        self.positive = true;
+        self.setSign(.pos);
     }
 
     /// Sets the Mutable to value. Value must be an primitive integer type.
@@ -193,8 +245,7 @@ pub const Mutable = struct {
         const needed_limbs = calcLimbLen(value);
         assert(needed_limbs <= self.limbs.len); // value too big
 
-        self.len = needed_limbs;
-        self.positive = value >= 0;
+        self.metadata = Metadata.init(Sign.fromBool(value >= 0), needed_limbs);
 
         switch (@typeInfo(T)) {
             .Int => |info| {
@@ -266,7 +317,7 @@ pub const Mutable = struct {
             i += 1;
         }
 
-        const ap_base: Const = .{ .limbs = &[_]Limb{base}, .positive = true };
+        const ap_base: Const = .{ .limbs = &[_]Limb{base}, .metadata = Metadata.init(.pos, 1) };
         self.set(0);
 
         for (value[i..]) |ch| {
@@ -274,12 +325,12 @@ pub const Mutable = struct {
                 continue;
             }
             const d = try std.fmt.charToDigit(ch, base);
-            const ap_d: Const = .{ .limbs = &[_]Limb{d}, .positive = true };
+            const ap_d: Const = .{ .limbs = &[_]Limb{d}, .metadata = Metadata.init(.pos, 1) };
 
             self.mul(self.toConst(), ap_base, limbs_buffer, allocator);
             self.add(self.toConst(), ap_d);
         }
-        self.positive = positive;
+        self.setSign(Sign.fromBool(positive));
     }
 
     /// Set self to either bound of a 2s-complement integer.
@@ -305,16 +356,15 @@ pub const Mutable = struct {
         const signmask = @as(Limb, 1) << bit; // 0b0..010..0 where 1 is the sign bit.
         const mask = (signmask << 1) -% 1; // 0b0..011..1 where the leftmost 1 is the sign bit.
 
-        r.positive = true;
+        r.setSign(.pos);
 
         switch (signedness) {
             .signed => switch (limit) {
                 .min => {
                     // Negative bound, signed = -0x80.
-                    r.len = req_limbs;
-                    @memset(r.limbs[0 .. r.len - 1], 0);
-                    r.limbs[r.len - 1] = signmask;
-                    r.positive = false;
+                    @memset(r.limbs[0 .. req_limbs - 1], 0);
+                    r.limbs[req_limbs - 1] = signmask;
+                    r.metadata = Metadata.init(.neg, req_limbs);
                 },
                 .max => {
                     // Positive bound, signed = 0x7F
@@ -330,9 +380,9 @@ pub const Mutable = struct {
                         const new_signmask = @as(Limb, 1) << msb; // 0b0..010..0 where 1 is the sign bit.
                         const new_mask = (new_signmask << 1) -% 1; // 0b0..001..1 where the rightmost 0 is the sign bit.
 
-                        r.len = new_req_limbs;
-                        @memset(r.limbs[0 .. r.len - 1], maxInt(Limb));
-                        r.limbs[r.len - 1] = new_mask;
+                        @memset(r.limbs[0 .. new_req_limbs - 1], maxInt(Limb));
+                        r.limbs[new_req_limbs - 1] = new_mask;
+                        r.setLen(new_req_limbs);
                     }
                 },
             },
@@ -343,9 +393,9 @@ pub const Mutable = struct {
                 },
                 .max => {
                     // Max bound, unsigned = 0xFF
-                    r.len = req_limbs;
-                    @memset(r.limbs[0 .. r.len - 1], maxInt(Limb));
-                    r.limbs[r.len - 1] = mask;
+                    @memset(r.limbs[0 .. req_limbs - 1], maxInt(Limb));
+                    r.limbs[req_limbs - 1] = mask;
+                    r.setLen(req_limbs);
                 },
             },
         }
@@ -387,8 +437,8 @@ pub const Mutable = struct {
         } else if (b.eqlZero()) {
             r.copy(a);
             return false;
-        } else if (a.positive != b.positive) {
-            if (a.positive) {
+        } else if (a.sign() != b.sign()) {
+            if (a.sign() == .pos) {
                 // (a) + (-b) => a - b
                 return r.subCarry(a, b.abs());
             } else {
@@ -396,14 +446,14 @@ pub const Mutable = struct {
                 return r.subCarry(b, a.abs());
             }
         } else {
-            r.positive = a.positive;
-            if (a.limbs.len >= b.limbs.len) {
-                const c = lladdcarry(r.limbs, a.limbs, b.limbs);
-                r.normalize(a.limbs.len);
+            r.setSign(a.sign());
+            if (a.len() >= b.len()) {
+                const c = lladdcarry(r.limbs, a.limbs[0..a.len()], b.limbs[0..b.len()]);
+                r.normalize(a.len());
                 return c != 0;
             } else {
-                const c = lladdcarry(r.limbs, b.limbs, a.limbs);
-                r.normalize(b.limbs.len);
+                const c = lladdcarry(r.limbs, b.limbs[0..b.len()], a.limbs[0..a.len()]);
+                r.normalize(b.len());
                 return c != 0;
             }
         }
@@ -419,10 +469,10 @@ pub const Mutable = struct {
         if (r.addCarry(a, b)) {
             // Fix up the result. Note that addCarry normalizes by a.limbs.len or b.limbs.len,
             // so we need to set the length here.
-            const msl = @max(a.limbs.len, b.limbs.len);
+            const msl = @max(a.len(), b.len());
             // `[add|sub]Carry` normalizes by `msl`, so we need to fix up the result manually here.
             // Note, the fact that it normalized means that the intermediary limbs are zero here.
-            r.len = msl + 1;
+            r.setLen(msl + 1);
             r.limbs[msl] = 1; // If this panics, there wasn't enough space in `r`.
         }
     }
@@ -438,13 +488,13 @@ pub const Mutable = struct {
         // Slice of the upper bits if they exist, these will be ignored and allows us to use addCarry to determine
         // if an overflow occurred.
         const x = Const{
-            .positive = a.positive,
-            .limbs = a.limbs[0..@min(req_limbs, a.limbs.len)],
+            .limbs = a.limbs,
+            .metadata = Metadata.init(a.sign(), @min(req_limbs, a.len())),
         };
 
         const y = Const{
-            .positive = b.positive,
-            .limbs = b.limbs[0..@min(req_limbs, b.limbs.len)],
+            .limbs = b.limbs,
+            .metadata = Metadata.init(b.sign(), @min(req_limbs, b.len())),
         };
 
         var carry_truncated = false;
@@ -454,10 +504,10 @@ pub const Mutable = struct {
             //   truncate anyway.
             // - a and b had less elements than req_limbs, and those were overflowed. This case needs to be handled.
             //   Note: after this we still might need to wrap.
-            const msl = @max(a.limbs.len, b.limbs.len);
+            const msl = @max(a.len(), b.len());
             if (msl < req_limbs) {
                 r.limbs[msl] = 1;
-                r.len = req_limbs;
+                r.setLen(req_limbs);
                 @memset(r.limbs[msl + 1 .. req_limbs], 0);
             } else {
                 carry_truncated = true;
@@ -483,13 +533,13 @@ pub const Mutable = struct {
         // Slice of the upper bits if they exist, these will be ignored and allows us to use addCarry to determine
         // if an overflow occurred.
         const x = Const{
-            .positive = a.positive,
-            .limbs = a.limbs[0..@min(req_limbs, a.limbs.len)],
+            .limbs = a.limbs,
+            .metadata = Metadata.init(a.sign(), @min(req_limbs, a.len())),
         };
 
         const y = Const{
-            .positive = b.positive,
-            .limbs = b.limbs[0..@min(req_limbs, b.limbs.len)],
+            .limbs = b.limbs,
+            .metadata = Metadata.init(b.sign(), @min(req_limbs, b.len())),
         };
 
         if (r.addCarry(x, y)) {
@@ -497,14 +547,14 @@ pub const Mutable = struct {
             // - We overflowed req_limbs, in which case we need to saturate.
             // - a and b had less elements than req_limbs, and those were overflowed.
             //   Note: In this case, might _also_ need to saturate.
-            const msl = @max(a.limbs.len, b.limbs.len);
+            const msl = @max(a.len(), b.len());
             if (msl < req_limbs) {
                 r.limbs[msl] = 1;
-                r.len = req_limbs;
+                r.setLen(req_limbs);
                 // Note: Saturation may still be required if msl == req_limbs - 1
             } else {
                 // Overflowed req_limbs, definitely saturate.
-                r.setTwosCompIntLimit(if (r.positive) .max else .min, signedness, bit_count);
+                r.setTwosCompIntLimit(if (r.sign() == .pos) .max else .min, signedness, bit_count);
             }
         }
 
@@ -520,45 +570,45 @@ pub const Mutable = struct {
     fn subCarry(r: *Mutable, a: Const, b: Const) bool {
         if (a.eqlZero()) {
             r.copy(b);
-            r.positive = !b.positive;
+            r.setSign(b.sign().negate());
             return false;
         } else if (b.eqlZero()) {
             r.copy(a);
             return false;
-        } else if (a.positive != b.positive) {
-            if (a.positive) {
+        } else if (a.sign() != b.sign()) {
+            if (a.sign() == .pos) {
                 // (a) - (-b) => a + b
                 return r.addCarry(a, b.abs());
             } else {
                 // (-a) - (b) => -a + -b
                 return r.addCarry(a, b.negate());
             }
-        } else if (a.positive) {
+        } else if (a.sign() == .pos) {
             if (a.order(b) != .lt) {
                 // (a) - (b) => a - b
-                const c = llsubcarry(r.limbs, a.limbs, b.limbs);
-                r.normalize(a.limbs.len);
-                r.positive = true;
+                const c = llsubcarry(r.limbs, a.limbs[0..a.len()], b.limbs[0..b.len()]);
+                r.normalize(a.len());
+                r.setSign(.pos);
                 return c != 0;
             } else {
                 // (a) - (b) => -b + a => -(b - a)
-                const c = llsubcarry(r.limbs, b.limbs, a.limbs);
-                r.normalize(b.limbs.len);
-                r.positive = false;
+                const c = llsubcarry(r.limbs, b.limbs[0..b.len()], a.limbs[0..a.len()]);
+                r.normalize(b.len());
+                r.setSign(.neg);
                 return c != 0;
             }
         } else {
             if (a.order(b) == .lt) {
                 // (-a) - (-b) => -(a - b)
-                const c = llsubcarry(r.limbs, a.limbs, b.limbs);
-                r.normalize(a.limbs.len);
-                r.positive = false;
+                const c = llsubcarry(r.limbs, a.limbs[0..a.len()], b.limbs[0..b.len()]);
+                r.normalize(a.len());
+                r.setSign(.neg);
                 return c != 0;
             } else {
                 // (-a) - (-b) => --b + -a => b - a
-                const c = llsubcarry(r.limbs, b.limbs, a.limbs);
-                r.normalize(b.limbs.len);
-                r.positive = true;
+                const c = llsubcarry(r.limbs, b.limbs[0..b.len()], a.limbs[0..a.len()]);
+                r.normalize(b.len());
+                r.setSign(.pos);
                 return c != 0;
             }
         }
@@ -604,17 +654,17 @@ pub const Mutable = struct {
     pub fn mul(rma: *Mutable, a: Const, b: Const, limbs_buffer: []Limb, allocator: ?Allocator) void {
         var buf_index: usize = 0;
 
-        const a_copy = if (rma.limbs.ptr == a.limbs.ptr) blk: {
+        const a_copy = if (rma.limbs.ptr == a.limbs) blk: {
             const start = buf_index;
-            @memcpy(limbs_buffer[buf_index..][0..a.limbs.len], a.limbs);
-            buf_index += a.limbs.len;
+            @memcpy(limbs_buffer[buf_index..][0..a.len()], a.limbs[0..a.len()]);
+            buf_index += a.len();
             break :blk a.toMutable(limbs_buffer[start..buf_index]).toConst();
         } else a;
 
-        const b_copy = if (rma.limbs.ptr == b.limbs.ptr) blk: {
+        const b_copy = if (rma.limbs.ptr == b.limbs) blk: {
             const start = buf_index;
-            @memcpy(limbs_buffer[buf_index..][0..b.limbs.len], b.limbs);
-            buf_index += b.limbs.len;
+            @memcpy(limbs_buffer[buf_index..][0..b.len()], b.limbs[0..b.len()]);
+            buf_index += b.len();
             break :blk b.toMutable(limbs_buffer[start..buf_index]).toConst();
         } else b;
 
@@ -632,25 +682,24 @@ pub const Mutable = struct {
     /// If `allocator` is provided, it will be used for temporary storage to improve
     /// multiplication performance. `error.OutOfMemory` is handled with a fallback algorithm.
     pub fn mulNoAlias(rma: *Mutable, a: Const, b: Const, allocator: ?Allocator) void {
-        assert(rma.limbs.ptr != a.limbs.ptr); // illegal aliasing
-        assert(rma.limbs.ptr != b.limbs.ptr); // illegal aliasing
+        assert(rma.limbs.ptr != a.limbs); // illegal aliasing
+        assert(rma.limbs.ptr != b.limbs); // illegal aliasing
 
-        if (a.limbs.len == 1 and b.limbs.len == 1) {
+        if (a.len() == 1 and b.len() == 1) {
             const ov = @mulWithOverflow(a.limbs[0], b.limbs[0]);
             rma.limbs[0] = ov[0];
             if (ov[1] == 0) {
-                rma.len = 1;
-                rma.positive = (a.positive == b.positive);
+                rma.metadata = Metadata.init(Sign.fromBool(a.sign() == b.sign()), 1);
                 return;
             }
         }
 
-        @memset(rma.limbs[0 .. a.limbs.len + b.limbs.len], 0);
+        @memset(rma.limbs[0 .. a.len() + b.len()], 0);
 
-        llmulacc(.add, allocator, rma.limbs, a.limbs, b.limbs);
+        llmulacc(.add, allocator, rma.limbs, a.limbs[0..a.len()], b.limbs[0..b.len()]);
 
-        rma.normalize(a.limbs.len + b.limbs.len);
-        rma.positive = (a.positive == b.positive);
+        rma.normalize(a.len() + b.len());
+        rma.setSign(Sign.fromBool(a.sign() == b.sign()));
     }
 
     /// rma = a * b with 2s-complement wrapping semantics.
@@ -674,17 +723,17 @@ pub const Mutable = struct {
         var buf_index: usize = 0;
         const req_limbs = calcTwosCompLimbCount(bit_count);
 
-        const a_copy = if (rma.limbs.ptr == a.limbs.ptr) blk: {
+        const a_copy = if (rma.limbs.ptr == a.limbs) blk: {
             const start = buf_index;
-            const a_len = @min(req_limbs, a.limbs.len);
+            const a_len = @min(req_limbs, a.len());
             @memcpy(limbs_buffer[buf_index..][0..a_len], a.limbs[0..a_len]);
             buf_index += a_len;
             break :blk a.toMutable(limbs_buffer[start..buf_index]).toConst();
         } else a;
 
-        const b_copy = if (rma.limbs.ptr == b.limbs.ptr) blk: {
+        const b_copy = if (rma.limbs.ptr == b.limbs) blk: {
             const start = buf_index;
-            const b_len = @min(req_limbs, b.limbs.len);
+            const b_len = @min(req_limbs, b.len());
             @memcpy(limbs_buffer[buf_index..][0..b_len], b.limbs[0..b_len]);
             buf_index += b_len;
             break :blk a.toMutable(limbs_buffer[start..buf_index]).toConst();
@@ -711,20 +760,20 @@ pub const Mutable = struct {
         bit_count: usize,
         allocator: ?Allocator,
     ) void {
-        assert(rma.limbs.ptr != a.limbs.ptr); // illegal aliasing
-        assert(rma.limbs.ptr != b.limbs.ptr); // illegal aliasing
+        assert(rma.limbs.ptr != a.limbs); // illegal aliasing
+        assert(rma.limbs.ptr != b.limbs); // illegal aliasing
 
         const req_limbs = calcTwosCompLimbCount(bit_count);
 
         // We can ignore the upper bits here, those results will be discarded anyway.
-        const a_limbs = a.limbs[0..@min(req_limbs, a.limbs.len)];
-        const b_limbs = b.limbs[0..@min(req_limbs, b.limbs.len)];
+        const a_limbs = a.limbs[0..@min(req_limbs, a.len())];
+        const b_limbs = b.limbs[0..@min(req_limbs, b.len())];
 
         @memset(rma.limbs[0..req_limbs], 0);
 
-        llmulacc(.add, allocator, rma.limbs, a_limbs, b_limbs);
-        rma.normalize(@min(req_limbs, a.limbs.len + b.limbs.len));
-        rma.positive = (a.positive == b.positive);
+        llmulacc(.add, allocator, rma.limbs, a_limbs[0..a.len()], b_limbs[0..b.len()]);
+        rma.normalize(@min(req_limbs, a.len() + b.len()));
+        rma.setSign(Sign.fromBool(a.sign() == b.sign()));
         rma.truncate(rma.toConst(), signedness, bit_count);
     }
 
@@ -740,16 +789,16 @@ pub const Mutable = struct {
 
         const limbs_required = calcTwosCompLimbCount(bit_count);
 
-        if (!a.positive) {
-            r.positive = true; // Negate.
+        if (a.sign() == .neg) {
+            r.setSign(.pos); // Negate.
             r.bitNotWrap(r.toConst(), .unsigned, bit_count); // Bitwise NOT.
             r.addScalar(r.toConst(), 1); // Add one.
-        } else if (limbs_required > a.limbs.len) {
+        } else if (limbs_required > a.len()) {
             // Zero-extend to our output length
-            for (r.limbs[a.limbs.len..limbs_required]) |*limb| {
+            for (r.limbs[a.len()..limbs_required]) |*limb| {
                 limb.* = 0;
             }
-            r.len = limbs_required;
+            r.setLen(limbs_required);
         }
 
         // 0b0..01..1000 with @log2(@sizeOf(Limb)) consecutive ones
@@ -785,10 +834,10 @@ pub const Mutable = struct {
             if (last_bit == 1) {
                 r.bitNotWrap(r.toConst(), .unsigned, bit_count); // Bitwise NOT.
                 r.addScalar(r.toConst(), 1); // Add one.
-                r.positive = false; // Negate.
+                r.setSign(.neg); // Negate.
             }
         }
-        r.normalize(r.len);
+        r.normalize(r.len());
     }
 
     /// r = @byteSwap(a) with 2s-complement semantics.
@@ -802,16 +851,16 @@ pub const Mutable = struct {
         r.copy(a);
         const limbs_required = calcTwosCompLimbCount(8 * byte_count);
 
-        if (!a.positive) {
-            r.positive = true; // Negate.
+        if (a.sign() == .neg) {
+            r.setSign(.pos); // Negate.
             r.bitNotWrap(r.toConst(), .unsigned, 8 * byte_count); // Bitwise NOT.
             r.addScalar(r.toConst(), 1); // Add one.
-        } else if (limbs_required > a.limbs.len) {
+        } else if (limbs_required > a.len()) {
             // Zero-extend to our output length
-            for (r.limbs[a.limbs.len..limbs_required]) |*limb| {
+            for (r.limbs[a.len()..limbs_required]) |*limb| {
                 limb.* = 0;
             }
-            r.len = limbs_required;
+            r.setLen(limbs_required);
         }
 
         // 0b0..01..1 with @log2(@sizeOf(Limb)) trailing ones
@@ -848,10 +897,10 @@ pub const Mutable = struct {
             if (last_byte & (1 << 7) != 0) { // Check sign bit of last byte
                 r.bitNotWrap(r.toConst(), .unsigned, 8 * byte_count); // Bitwise NOT.
                 r.addScalar(r.toConst(), 1); // Add one.
-                r.positive = false; // Negate.
+                r.setSign(.neg); // Negate.
             }
         }
-        r.normalize(r.len);
+        r.normalize(r.len());
     }
 
     /// r = @popCount(a) with 2s-complement semantics.
@@ -862,14 +911,14 @@ pub const Mutable = struct {
     pub fn popCount(r: *Mutable, a: Const, bit_count: usize) void {
         r.copy(a);
 
-        if (!a.positive) {
-            r.positive = true; // Negate.
+        if (a.sign() == .neg) {
+            r.setSign(.pos); // Negate.
             r.bitNotWrap(r.toConst(), .unsigned, bit_count); // Bitwise NOT.
             r.addScalar(r.toConst(), 1); // Add one.
         }
 
         var sum: Limb = 0;
-        for (r.limbs[0..r.len]) |limb| {
+        for (r.limbs[0..r.len()]) |limb| {
             sum += @popCount(limb);
         }
         r.set(sum);
@@ -886,14 +935,14 @@ pub const Mutable = struct {
     /// multiplication performance. `error.OutOfMemory` is handled with a fallback algorithm.
     pub fn sqrNoAlias(rma: *Mutable, a: Const, opt_allocator: ?Allocator) void {
         _ = opt_allocator;
-        assert(rma.limbs.ptr != a.limbs.ptr); // illegal aliasing
+        assert(rma.limbs.ptr != a.limbs); // illegal aliasing
 
         @memset(rma.limbs, 0);
 
-        llsquareBasecase(rma.limbs, a.limbs);
+        llsquareBasecase(rma.limbs, a.limbs[0..a.len()]);
 
-        rma.normalize(2 * a.limbs.len + 1);
-        rma.positive = true;
+        rma.normalize(2 * a.len() + 1);
+        rma.setSign(.pos);
     }
 
     /// q = a / b (rem r)
@@ -913,7 +962,7 @@ pub const Mutable = struct {
         b: Const,
         limbs_buffer: []Limb,
     ) void {
-        const sep = a.limbs.len + 2;
+        const sep = a.len() + 2;
         var x = a.toMutable(limbs_buffer[0..sep]);
         var y = b.toMutable(limbs_buffer[sep..]);
 
@@ -937,9 +986,9 @@ pub const Mutable = struct {
         // = @divTrunc(a + b - 1, b) * b + @rem(a - 1, b) = a + b - 1
         // = @divTrunc(a + b - 1, b) * b + @rem(a - 1, b) - b + 1 = a
 
-        if (a.positive and b.positive) {
+        if (a.sign() == .pos and b.sign() == .pos) {
             // Positive-positive case, don't need to do anything.
-        } else if (a.positive and !b.positive) {
+        } else if (a.sign() == .pos and b.sign() == .neg) {
             // a/-b -> q is negative, and so we need to fix flooring.
             // Subtract one to make the division flooring.
 
@@ -966,10 +1015,10 @@ pub const Mutable = struct {
             //   => @mod(a, -b) = b - 1 - b + 1 = 0
             if (!r.eqlZero()) {
                 q.addScalar(q.toConst(), -1);
-                r.positive = true;
+                r.setSign(.pos);
                 r.sub(r.toConst(), y.toConst().abs());
             }
-        } else if (!a.positive and b.positive) {
+        } else if (a.sign() == .neg and b.sign() == .pos) {
             // -a/b -> q is negative, and so we need to fix flooring.
             // Subtract one to make the division flooring.
 
@@ -997,10 +1046,10 @@ pub const Mutable = struct {
             //   => @mod(-a, b) = -(b - 1) + b - 1 = 0
             if (!r.eqlZero()) {
                 q.addScalar(q.toConst(), -1);
-                r.positive = false;
+                r.setSign(.neg);
                 r.add(r.toConst(), y.toConst().abs());
             }
-        } else if (!a.positive and !b.positive) {
+        } else if (a.sign() == .neg and b.sign() == .neg) {
             // a/b -> q is positive, don't need to do anything to fix flooring.
 
             // @divFloor(-a, -b) * -b + @mod(-a, -b) = -a
@@ -1019,7 +1068,7 @@ pub const Mutable = struct {
             // @divTrunc(a, b) * b + @rem(a, b) = @divTrunc(a, b) * b - @mod(-a, -b)
             // => @rem(a, b) = -@mod(-a, -b)
             // => @mod(-a, -b) = -@rem(a, b)
-            r.positive = false;
+            r.setSign(.neg);
         }
     }
 
@@ -1040,7 +1089,7 @@ pub const Mutable = struct {
         b: Const,
         limbs_buffer: []Limb,
     ) void {
-        const sep = a.limbs.len + 2;
+        const sep = a.len() + 2;
         var x = a.toMutable(limbs_buffer[0..sep]);
         var y = b.toMutable(limbs_buffer[sep..]);
 
@@ -1054,9 +1103,9 @@ pub const Mutable = struct {
     /// Asserts there is enough memory to fit the result. The upper bound Limb count is
     /// `a.limbs.len + (shift / (@sizeOf(Limb) * 8))`.
     pub fn shiftLeft(r: *Mutable, a: Const, shift: usize) void {
-        llshl(r.limbs[0..], a.limbs[0..a.limbs.len], shift);
-        r.normalize(a.limbs.len + (shift / limb_bits) + 1);
-        r.positive = a.positive;
+        llshl(r.limbs[0..], a.limbs[0..a.len()], shift);
+        r.normalize(a.len() + (shift / limb_bits) + 1);
+        r.setSign(a.sign());
     }
 
     /// r = a <<| shift with 2s-complement saturating semantics.
@@ -1068,7 +1117,7 @@ pub const Mutable = struct {
     pub fn shiftLeftSat(r: *Mutable, a: Const, shift: usize, signedness: Signedness, bit_count: usize) void {
         // Special case: When the argument is negative, but the result is supposed to be unsigned,
         // return 0 in all cases.
-        if (!a.positive and signedness == .unsigned) {
+        if (a.sign() == .neg and signedness == .unsigned) {
             r.set(0);
             return;
         }
@@ -1084,7 +1133,7 @@ pub const Mutable = struct {
             if (a.eqlZero()) {
                 r.set(0);
             } else {
-                r.setTwosCompIntLimit(if (a.positive) .max else .min, signedness, bit_count);
+                r.setTwosCompIntLimit(if (a.sign() == .pos) .max else .min, signedness, bit_count);
             }
             return;
         }
@@ -1092,7 +1141,7 @@ pub const Mutable = struct {
         const checkbit = bit_count - shift - @intFromBool(signedness == .signed);
         // If `checkbit` and more significant bits are zero, no overflow will take place.
 
-        if (checkbit >= a.limbs.len * limb_bits) {
+        if (checkbit >= a.len() * limb_bits) {
             // `checkbit` is outside the range of a, so definitely no overflow will take place. We
             // can defer to a normal shift.
             // Note that if `a` is normalized (which we assume), this checks for set bits in the upper limbs.
@@ -1101,12 +1150,12 @@ pub const Mutable = struct {
             // In this case the shift of the most significant limb may still overflow.
             r.shiftLeft(a, shift);
             return;
-        } else if (checkbit < (a.limbs.len - 1) * limb_bits) {
+        } else if (checkbit < (a.len() - 1) * limb_bits) {
             // `checkbit` is not in the most significant limb. If `a` is normalized the most significant
             // limb will not be zero, so in this case we need to saturate. Note that `a.limbs.len` must be
             // at least one according to normalization rules.
 
-            r.setTwosCompIntLimit(if (a.positive) .max else .min, signedness, bit_count);
+            r.setTwosCompIntLimit(if (a.sign() == .pos) .max else .min, signedness, bit_count);
             return;
         }
 
@@ -1115,17 +1164,17 @@ pub const Mutable = struct {
         // const msb = @truncate(Log2Limb, checkbit);
         // const checkmask = (@as(Limb, 1) << msb) -% 1;
 
-        if (a.limbs[a.limbs.len - 1] >> @as(Log2Limb, @truncate(checkbit)) != 0) {
+        if (a.limbs[a.len() - 1] >> @as(Log2Limb, @truncate(checkbit)) != 0) {
             // Need to saturate.
-            r.setTwosCompIntLimit(if (a.positive) .max else .min, signedness, bit_count);
+            r.setTwosCompIntLimit(if (a.sign() == .pos) .max else .min, signedness, bit_count);
             return;
         }
 
         // This shift should not be able to overflow, so invoke llshl and normalize manually
         // to avoid the extra required limb.
-        llshl(r.limbs[0..], a.limbs[0..a.limbs.len], shift);
-        r.normalize(a.limbs.len + (shift / limb_bits));
-        r.positive = a.positive;
+        llshl(r.limbs[0..], a.limbs[0..a.len()], shift);
+        r.normalize(a.len() + (shift / limb_bits));
+        r.setSign(a.sign());
     }
 
     /// r = a >> shift
@@ -1134,25 +1183,23 @@ pub const Mutable = struct {
     /// Asserts there is enough memory to fit the result. The upper bound Limb count is
     /// `a.limbs.len - (shift / (@sizeOf(Limb) * 8))`.
     pub fn shiftRight(r: *Mutable, a: Const, shift: usize) void {
-        if (a.limbs.len <= shift / limb_bits) {
+        if (a.len() <= shift / limb_bits) {
             // Shifting negative numbers converges to -1 instead of 0
-            if (a.positive) {
-                r.len = 1;
-                r.positive = true;
+            if (a.sign() == .pos) {
+                r.metadata = Metadata.init(.pos, 1);
                 r.limbs[0] = 0;
             } else {
-                r.len = 1;
-                r.positive = false;
+                r.metadata = Metadata.init(.neg, 1);
                 r.limbs[0] = 1;
             }
             return;
         }
 
-        llshr(r.limbs[0..], a.limbs[0..a.limbs.len], shift);
-        r.normalize(a.limbs.len - (shift / limb_bits));
-        r.positive = a.positive;
+        llshr(r.limbs[0..], a.limbs[0..a.len()], shift);
+        r.normalize(a.len() - (shift / limb_bits));
+        r.setSign(a.sign());
         // Shifting negative numbers converges to -1 instead of 0
-        if (!r.positive and r.len == 1 and r.limbs[0] == 0) {
+        if (r.sign() == .neg and r.len() == 1 and r.limbs[0] == 0) {
             r.limbs[0] = 1;
         }
     }
@@ -1164,7 +1211,8 @@ pub const Mutable = struct {
     /// r is `calcTwosCompLimbCount(bit_count)`.
     pub fn bitNotWrap(r: *Mutable, a: Const, signedness: Signedness, bit_count: usize) void {
         r.copy(a.negate());
-        const negative_one = Const{ .limbs = &.{1}, .positive = false };
+        const one: []const Limb = &.{1};
+        const negative_one = Const{ .limbs = one.ptr, .metadata = Metadata.init(.neg, 1) };
         _ = r.addWrap(r.toConst(), negative_one, signedness, bit_count);
     }
 
@@ -1184,12 +1232,12 @@ pub const Mutable = struct {
             return;
         }
 
-        if (a.limbs.len >= b.limbs.len) {
-            r.positive = llsignedor(r.limbs, a.limbs, a.positive, b.limbs, b.positive);
-            r.normalize(if (b.positive) a.limbs.len else b.limbs.len);
+        if (a.len() >= b.len()) {
+            r.setSign(Sign.fromBool(llsignedor(r.limbs, a.limbs[0..a.len()], a.sign() == .pos, b.limbs[0..b.len()], b.sign() == .pos)));
+            r.normalize(if (b.sign() == .pos) a.len() else b.len());
         } else {
-            r.positive = llsignedor(r.limbs, b.limbs, b.positive, a.limbs, a.positive);
-            r.normalize(if (a.positive) b.limbs.len else a.limbs.len);
+            r.setSign(Sign.fromBool(llsignedor(r.limbs, b.limbs[0..b.len()], b.sign() == .pos, a.limbs[0..a.len()], a.sign() == .pos)));
+            r.normalize(if (a.sign() == .pos) b.len() else a.len());
         }
     }
 
@@ -1209,12 +1257,12 @@ pub const Mutable = struct {
             return;
         }
 
-        if (a.limbs.len >= b.limbs.len) {
-            r.positive = llsignedand(r.limbs, a.limbs, a.positive, b.limbs, b.positive);
-            r.normalize(if (a.positive or b.positive) b.limbs.len else a.limbs.len + 1);
+        if (a.len() >= b.len()) {
+            r.setSign(Sign.fromBool(llsignedand(r.limbs, a.limbs[0..a.len()], a.sign() == .pos, b.limbs[0..b.len()], b.sign() == .pos)));
+            r.normalize(if (a.sign() == .pos or b.sign() == .pos) b.len() else a.len() + 1);
         } else {
-            r.positive = llsignedand(r.limbs, b.limbs, b.positive, a.limbs, a.positive);
-            r.normalize(if (a.positive or b.positive) a.limbs.len else b.limbs.len + 1);
+            r.setSign(Sign.fromBool(llsignedand(r.limbs, b.limbs[0..b.len()], b.sign() == .pos, a.limbs[0..a.len()], a.sign() == .pos)));
+            r.normalize(if (a.sign() == .pos or b.sign() == .pos) a.len() else b.len() + 1);
         }
     }
 
@@ -1234,12 +1282,12 @@ pub const Mutable = struct {
             return;
         }
 
-        if (a.limbs.len > b.limbs.len) {
-            r.positive = llsignedxor(r.limbs, a.limbs, a.positive, b.limbs, b.positive);
-            r.normalize(a.limbs.len + @intFromBool(a.positive != b.positive));
+        if (a.len() > b.len()) {
+            r.setSign(Sign.fromBool(llsignedxor(r.limbs, a.limbs[0..a.len()], a.sign() == .pos, b.limbs[0..b.len()], b.sign() == .pos)));
+            r.normalize(a.len() + @intFromBool(a.sign() != b.sign()));
         } else {
-            r.positive = llsignedxor(r.limbs, b.limbs, b.positive, a.limbs, a.positive);
-            r.normalize(b.limbs.len + @intFromBool(a.positive != b.positive));
+            r.setSign(Sign.fromBool(llsignedxor(r.limbs, b.limbs[0..b.len()], b.sign() == .pos, a.limbs[0..a.len()], a.sign() == .pos)));
+            r.normalize(b.len() + @intFromBool(a.sign() != b.sign()));
         }
     }
 
@@ -1253,14 +1301,14 @@ pub const Mutable = struct {
     pub fn gcd(rma: *Mutable, x: Const, y: Const, limbs_buffer: *std.ArrayList(Limb)) !void {
         const prev_len = limbs_buffer.items.len;
         defer limbs_buffer.shrinkRetainingCapacity(prev_len);
-        const x_copy = if (rma.limbs.ptr == x.limbs.ptr) blk: {
+        const x_copy = if (rma.limbs.ptr == x.limbs) blk: {
             const start = limbs_buffer.items.len;
-            try limbs_buffer.appendSlice(x.limbs);
+            try limbs_buffer.appendSlice(x.limbs[0..x.len()]);
             break :blk x.toMutable(limbs_buffer.items[start..]).toConst();
         } else x;
-        const y_copy = if (rma.limbs.ptr == y.limbs.ptr) blk: {
+        const y_copy = if (rma.limbs.ptr == y.limbs) blk: {
             const start = limbs_buffer.items.len;
-            try limbs_buffer.appendSlice(y.limbs);
+            try limbs_buffer.appendSlice(y.limbs[0..y.len()]);
             break :blk y.toMutable(limbs_buffer.items[start..]).toConst();
         } else y;
 
@@ -1276,7 +1324,7 @@ pub const Mutable = struct {
     ///
     /// `limbs_buffer` is used for temporary storage.
     /// The amount required is given by `calcPowLimbsBufferLen`.
-    pub fn pow(r: *Mutable, a: Const, b: u32, limbs_buffer: []Limb) void {
+    pub fn pow(r: *Mutable, a: Const, b: u32, limbs_buffer: []Limb) !void {
         assert(r.limbs.ptr != a.limbs.ptr); // illegal aliasing
 
         // Handle all the trivial cases first
@@ -1295,10 +1343,10 @@ pub const Mutable = struct {
         if (a.eqlZero()) {
             // 0^b = 0
             return r.set(0);
-        } else if (a.limbs.len == 1 and a.limbs[0] == 1) {
+        } else if (a.len() == 1 and a.limbs[0] == 1) {
             // 1^b = 1 and -1^b = ±1
             r.set(1);
-            r.positive = a.positive or (b & 1) == 0;
+            r.setSign(Sign.fromBool(a.sign() == .pos or (b & 1) == 0));
             return;
         }
 
@@ -1307,10 +1355,10 @@ pub const Mutable = struct {
         assert(r.limbs.len >= needed_limbs);
         assert(limbs_buffer.len >= needed_limbs);
 
-        llpow(r.limbs, a.limbs, b, limbs_buffer);
+        llpow(r.limbs, a.limbs[0..a.len()], b, limbs_buffer);
 
         r.normalize(needed_limbs);
-        r.positive = a.positive or (b & 1) == 0;
+        r.setSign(Sign.fromBool(a.sign() == .pos or (b & 1) == 0));
     }
 
     /// r = ⌊√a⌋
@@ -1332,7 +1380,7 @@ pub const Mutable = struct {
         var buf_index: usize = 0;
         var t = b: {
             const start = buf_index;
-            buf_index += a.limbs.len;
+            buf_index += a.len();
             break :b Mutable.init(limbs_buffer[start..buf_index], 0);
         };
         var u = b: {
@@ -1377,8 +1425,8 @@ pub const Mutable = struct {
     ///
     /// `limbs_buffer` is used for temporary storage during the operation.
     pub fn gcdNoAlias(rma: *Mutable, x: Const, y: Const, limbs_buffer: *std.ArrayList(Limb)) !void {
-        assert(rma.limbs.ptr != x.limbs.ptr); // illegal aliasing
-        assert(rma.limbs.ptr != y.limbs.ptr); // illegal aliasing
+        assert(rma.limbs.ptr != x.limbs); // illegal aliasing
+        assert(rma.limbs.ptr != y.limbs); // illegal aliasing
         return gcdLehmer(rma, x, y, limbs_buffer);
     }
 
@@ -1405,7 +1453,7 @@ pub const Mutable = struct {
         defer tmp_x.deinit();
 
         while (y.len() > 1 and !y.eqlZero()) {
-            assert(x.isPositive() and y.isPositive());
+            assert(x.sign() == .pos and y.sign() == .pos);
             assert(x.len() >= y.len());
 
             var xh: SignedDoubleLimb = x.limbs[x.len() - 1];
@@ -1438,7 +1486,7 @@ pub const Mutable = struct {
             if (B == 0) {
                 // t_big = x % y, r is unused
                 try r.divTrunc(&t_big, &x, &y);
-                assert(t_big.isPositive());
+                assert(t_big.sign() == .pos);
 
                 x.swap(&y);
                 y.swap(&t_big);
@@ -1482,13 +1530,13 @@ pub const Mutable = struct {
         assert(!y.eqlZero()); // division by zero
         assert(q != r); // illegal aliasing
 
-        const q_positive = (x.positive == y.positive);
-        const r_positive = x.positive;
+        const q_sign = Sign.fromBool(x.sign() == y.sign());
+        const r_sign = Sign.fromBool(x.sign() == .pos);
 
         if (x.toConst().orderAbs(y.toConst()) == .lt) {
             // q may alias x so handle r first.
             r.copy(x.toConst());
-            r.positive = r_positive;
+            r.setSign(r_sign);
 
             q.set(0);
             return;
@@ -1500,57 +1548,53 @@ pub const Mutable = struct {
         // const x_trailing = std.mem.indexOfScalar(Limb, x.limbs[0..x.len], 0).?;
         // const y_trailing = std.mem.indexOfScalar(Limb, y.limbs[0..y.len], 0).?;
 
-        const x_trailing = for (x.limbs[0..x.len], 0..) |xi, i| {
+        const x_trailing = for (x.limbs[0..x.len()], 0..) |xi, i| {
             if (xi != 0) break i;
         } else unreachable;
 
-        const y_trailing = for (y.limbs[0..y.len], 0..) |yi, i| {
+        const y_trailing = for (y.limbs[0..y.len()], 0..) |yi, i| {
             if (yi != 0) break i;
         } else unreachable;
 
         const xy_trailing = @min(x_trailing, y_trailing);
 
-        if (y.len - xy_trailing == 1) {
-            const divisor = y.limbs[y.len - 1];
+        if (y.len() - xy_trailing == 1) {
+            const divisor = y.limbs[y.len() - 1];
 
             // Optimization for small divisor. By using a half limb we can avoid requiring DoubleLimb
             // divisions in the hot code path. This may often require compiler_rt software-emulation.
             if (divisor < maxInt(HalfLimb)) {
-                lldiv0p5(q.limbs, &r.limbs[0], x.limbs[xy_trailing..x.len], @as(HalfLimb, @intCast(divisor)));
+                lldiv0p5(q.limbs, &r.limbs[0], x.limbs[xy_trailing..x.len()], @as(HalfLimb, @intCast(divisor)));
             } else {
-                lldiv1(q.limbs, &r.limbs[0], x.limbs[xy_trailing..x.len], divisor);
+                lldiv1(q.limbs, &r.limbs[0], x.limbs[xy_trailing..x.len()], divisor);
             }
 
-            q.normalize(x.len - xy_trailing);
-            q.positive = q_positive;
+            q.normalize(x.len() - xy_trailing);
+            q.setSign(q_sign);
 
-            r.len = 1;
-            r.positive = r_positive;
+            r.metadata = Metadata.init(r_sign, 1);
         } else {
             // Shrink x, y such that the trailing zero limbs shared between are removed.
             var x0 = Mutable{
                 .limbs = x.limbs[xy_trailing..],
-                .len = x.len - xy_trailing,
-                .positive = true,
+                .metadata = Metadata.init(.pos, x.len() - xy_trailing),
             };
 
             var y0 = Mutable{
                 .limbs = y.limbs[xy_trailing..],
-                .len = y.len - xy_trailing,
-                .positive = true,
+                .metadata = Metadata.init(.pos, y.len() - xy_trailing),
             };
 
             divmod(q, r, &x0, &y0);
-            q.positive = q_positive;
-
-            r.positive = r_positive;
+            q.setSign(q_sign);
+            r.setSign(r_sign);
         }
 
-        if (xy_trailing != 0 and r.limbs[r.len - 1] != 0) {
+        if (xy_trailing != 0 and r.limbs[r.len() - 1] != 0) {
             // Manually shift here since we know its limb aligned.
-            mem.copyBackwards(Limb, r.limbs[xy_trailing..], r.limbs[0..r.len]);
+            mem.copyBackwards(Limb, r.limbs[xy_trailing..], r.limbs[0..r.len()]);
             @memset(r.limbs[0..xy_trailing], 0);
-            r.len += xy_trailing;
+            r.setLen(r.len() + xy_trailing);
         }
     }
 
@@ -1566,7 +1610,7 @@ pub const Mutable = struct {
     ) void {
         // 0.
         // Normalize so that y[t] > b/2
-        const lz = @clz(y.limbs[y.len - 1]);
+        const lz = @clz(y.limbs[y.len() - 1]);
         const norm_shift = if (lz == 0 and y.toConst().isOdd())
             limb_bits // Force an extra limb so that y is even.
         else
@@ -1575,15 +1619,14 @@ pub const Mutable = struct {
         x.shiftLeft(x.toConst(), norm_shift);
         y.shiftLeft(y.toConst(), norm_shift);
 
-        const n = x.len - 1;
-        const t = y.len - 1;
+        const n = x.len() - 1;
+        const t = y.len() - 1;
         const shift = n - t;
 
         // 1.
         // for 0 <= j <= n - t, set q[j] to 0
-        q.len = shift + 1;
-        q.positive = true;
-        @memset(q.limbs[0..q.len], 0);
+        q.metadata = Metadata.init(.pos, shift + 1);
+        @memset(q.limbs[0..q.len()], 0);
 
         // 2.
         // while x >= y * b^(n - t):
@@ -1599,8 +1642,7 @@ pub const Mutable = struct {
             // 'divide' x by b^(n - t)
             var tmp = Mutable{
                 .limbs = x.limbs[shift..],
-                .len = x.len - shift,
-                .positive = true,
+                .metadata = Metadata.init(.pos, x.len() - shift),
             };
 
             if (tmp.toConst().order(y.toConst()) != .lt) {
@@ -1672,7 +1714,7 @@ pub const Mutable = struct {
             // Note, we multiply by a single limb here.
             // The shift doesn't need to be performed if we add the result of the first multiplication
             // to x[i - t - 1].
-            const underflow = llmulLimb(.sub, x.limbs[k..x.len], y.limbs[0..y.len], q.limbs[k]);
+            const underflow = llmulLimb(.sub, x.limbs[k..x.len()], y.limbs[0..y.len()], q.limbs[k]);
 
             // 3.4.
             // if x < 0:
@@ -1681,13 +1723,13 @@ pub const Mutable = struct {
             // Note, we check for x < 0 using the underflow flag from the previous operation.
             if (underflow) {
                 // While we didn't properly set the signedness of x, this operation should 'flow' it back to positive.
-                llaccum(.add, x.limbs[k..x.len], y.limbs[0..y.len]);
+                llaccum(.add, x.limbs[k..x.len()], y.limbs[0..y.len()]);
                 q.limbs[k] -= 1;
             }
         }
 
-        x.normalize(x.len);
-        q.normalize(q.len);
+        x.normalize(x.len());
+        q.normalize(q.len());
 
         // De-normalize r and y.
         r.shiftRight(x.toConst(), norm_shift);
@@ -1701,7 +1743,7 @@ pub const Mutable = struct {
     /// Asserts `r` has enough storage to store the result.
     /// The upper bound is `calcTwosCompLimbCount(a.len)`.
     pub fn convertToTwosComplement(r: *Mutable, a: Const, signedness: Signedness, bit_count: usize) void {
-        if (a.positive) {
+        if (a.sign() == .pos) {
             r.truncate(a, signedness, bit_count);
             return;
         }
@@ -1717,16 +1759,16 @@ pub const Mutable = struct {
         const mask = (signmask << 1) -% 1;
 
         r.addScalar(a.abs(), -1);
-        if (req_limbs > r.len) {
-            @memset(r.limbs[r.len..req_limbs], 0);
+        if (req_limbs > r.len()) {
+            @memset(r.limbs[r.len()..req_limbs], 0);
         }
 
         assert(r.limbs.len >= req_limbs);
-        r.len = req_limbs;
+        r.setLen(req_limbs);
 
-        llnot(r.limbs[0..r.len]);
-        r.limbs[r.len - 1] &= mask;
-        r.normalize(r.len);
+        llnot(r.limbs[0..r.len()]);
+        r.limbs[r.len() - 1] &= mask;
+        r.normalize(r.len());
     }
 
     /// Truncate an integer to a number of bits, following 2s-complement semantics.
@@ -1747,7 +1789,7 @@ pub const Mutable = struct {
         const signmask = @as(Limb, 1) << bit; // 0b0..010...0 where 1 is the sign bit.
         const mask = (signmask << 1) -% 1; // 0b0..01..1 where the leftmost 1 is the sign bit.
 
-        if (!a.positive) {
+        if (a.sign() == .neg) {
             // Convert the integer from sign-magnitude into twos-complement.
             // -x = ~(x - 1)
             // Note, we simply take req_limbs * @bitSizeOf(Limb) as the
@@ -1756,13 +1798,13 @@ pub const Mutable = struct {
             r.addScalar(a.abs(), -1);
 
             // Zero-extend the result
-            if (req_limbs > r.len) {
-                @memset(r.limbs[r.len..req_limbs], 0);
+            if (req_limbs > r.len()) {
+                @memset(r.limbs[r.len()..req_limbs], 0);
             }
 
             // Truncate to required number of limbs.
             assert(r.limbs.len >= req_limbs);
-            r.len = req_limbs;
+            r.setLen(req_limbs);
 
             // Without truncating, we can already peek at the sign bit of the result here.
             // Note that it will be 0 if the result is negative, as we did not apply the flip here.
@@ -1776,43 +1818,42 @@ pub const Mutable = struct {
             // Also note that `mask` is zero for all other bits, reducing to the identity.
             // This means that we still need to use & mask to clear off the upper bits.
 
-            if (signedness == .signed and r.limbs[r.len - 1] & signmask == 0) {
+            if (signedness == .signed and r.limbs[r.len() - 1] & signmask == 0) {
                 // Re-add the one and negate to get the result.
-                r.limbs[r.len - 1] &= mask;
+                r.limbs[r.len() - 1] &= mask;
                 // Note, addition cannot require extra limbs here as we did a subtraction before.
                 r.addScalar(r.toConst(), 1);
-                r.normalize(r.len);
-                r.positive = false;
+                r.normalize(r.len());
+                r.setSign(.neg);
             } else {
-                llnot(r.limbs[0..r.len]);
-                r.limbs[r.len - 1] &= mask;
-                r.normalize(r.len);
+                llnot(r.limbs[0..r.len()]);
+                r.limbs[r.len() - 1] &= mask;
+                r.normalize(r.len());
             }
         } else {
-            if (a.limbs.len < req_limbs) {
+            if (a.len() < req_limbs) {
                 // Integer fits within target bits, no wrapping required.
                 r.copy(a);
                 return;
             }
 
             r.copy(.{
-                .positive = a.positive,
-                .limbs = a.limbs[0..req_limbs],
+                .limbs = a.limbs,
+                .metadata = Metadata.init(.pos, req_limbs),
             });
-            r.limbs[r.len - 1] &= mask;
-            r.normalize(r.len);
+            r.limbs[r.len() - 1] &= mask;
+            r.normalize(r.len());
 
-            if (signedness == .signed and r.limbs[r.len - 1] & signmask != 0) {
+            if (signedness == .signed and r.limbs[r.len() - 1] & signmask != 0) {
                 // Convert 2s-complement back to sign-magnitude.
                 // Sign-extend the upper bits so that they are inverted correctly.
-                r.limbs[r.len - 1] |= ~mask;
-                llnot(r.limbs[0..r.len]);
+                r.limbs[r.len() - 1] |= ~mask;
+                llnot(r.limbs[0..r.len()]);
 
                 // Note, can only overflow if r holds 0xFFF...F which can only happen if
                 // a holds 0.
                 r.addScalar(r.toConst(), 1);
-
-                r.positive = false;
+                r.setSign(.neg);
             }
         }
     }
@@ -1824,7 +1865,7 @@ pub const Mutable = struct {
     /// The upper bound is `calcTwosCompLimbCount(a.len)`.
     pub fn saturate(r: *Mutable, a: Const, signedness: Signedness, bit_count: usize) void {
         if (!a.fitsInTwosComp(signedness, bit_count)) {
-            r.setTwosCompIntLimit(if (r.positive) .max else .min, signedness, bit_count);
+            r.setTwosCompIntLimit(if (r.sign() == .pos) .max else .min, signedness, bit_count);
         }
     }
 
@@ -1860,8 +1901,7 @@ pub const Mutable = struct {
     ) void {
         if (bit_count == 0) {
             x.limbs[0] = 0;
-            x.len = 1;
-            x.positive = true;
+            x.metadata = Metadata.init(.pos, 1);
             return;
         }
 
@@ -1919,9 +1959,8 @@ pub const Mutable = struct {
             limb_index += 1;
         }
 
-        x.positive = positive;
-        x.len = limb_index;
-        x.normalize(x.len);
+        x.metadata = Metadata.init(Sign.fromBool(positive), limb_index);
+        x.normalize(x.len());
     }
 
     /// Normalize a possible sequence of leading zeros.
@@ -1930,7 +1969,7 @@ pub const Mutable = struct {
     /// [1, 2, 0, 0, 0] -> [1, 2]
     /// [0, 0, 0, 0, 0] -> [0]
     pub fn normalize(r: *Mutable, length: usize) void {
-        r.len = llnormalize(r.limbs[0..length]);
+        r.setLen(llnormalize(r.limbs[0..length]));
     }
 };
 
@@ -1943,51 +1982,57 @@ pub const Const = struct {
     /// * Zero is represented as limbs.len == 1 with limbs[0] == 0.
     ///
     /// Accessing limbs directly should be avoided.
-    limbs: []const Limb,
-    positive: bool,
+    limbs: [*]const Limb,
+    metadata: Metadata,
+
+    /// Returns the number of limbs used to represent the current value.
+    pub fn len(self: Const) usize {
+        return self.metadata.len();
+    }
+
+    /// Returns the sign of the current value.
+    pub fn sign(self: Const) Sign {
+        return self.metadata.sign();
+    }
 
     /// The result is an independent resource which is managed by the caller.
     pub fn toManaged(self: Const, allocator: Allocator) Allocator.Error!Managed {
-        const limbs = try allocator.alloc(Limb, @max(Managed.default_capacity, self.limbs.len));
-        @memcpy(limbs[0..self.limbs.len], self.limbs);
+        const limbs = try allocator.alloc(Limb, @max(Managed.default_capacity, self.len()));
+        @memcpy(limbs[0..self.len()], self.limbs);
         return Managed{
             .allocator = allocator,
             .limbs = limbs,
-            .metadata = if (self.positive)
-                self.limbs.len & ~Managed.sign_bit
-            else
-                self.limbs.len | Managed.sign_bit,
+            .metadata = self.metadata,
         };
     }
 
     /// Asserts `limbs` is big enough to store the value.
     pub fn toMutable(self: Const, limbs: []Limb) Mutable {
-        @memcpy(limbs[0..self.limbs.len], self.limbs[0..self.limbs.len]);
+        @memcpy(limbs[0..self.len()], self.limbs[0..self.len()]);
         return .{
             .limbs = limbs,
-            .positive = self.positive,
-            .len = self.limbs.len,
+            .metadata = self.metadata,
         };
     }
 
     pub fn dump(self: Const) void {
-        for (self.limbs[0..self.limbs.len]) |limb| {
+        for (self.limbs[0..self.len()]) |limb| {
             std.debug.print("{x} ", .{limb});
         }
-        std.debug.print("positive={}\n", .{self.positive});
+        std.debug.print("positive={}\n", .{self.sign() == .pos});
     }
 
     pub fn abs(self: Const) Const {
         return .{
             .limbs = self.limbs,
-            .positive = true,
+            .metadata = self.metadata.withSign(.pos),
         };
     }
 
     pub fn negate(self: Const) Const {
         return .{
             .limbs = self.limbs,
-            .positive = !self.positive,
+            .metadata = self.metadata.withSign(self.sign().negate()),
         };
     }
 
@@ -2001,7 +2046,7 @@ pub const Const = struct {
 
     /// Returns the number of bits required to represent the absolute value of an integer.
     pub fn bitCountAbs(self: Const) usize {
-        return (self.limbs.len - 1) * limb_bits + (limb_bits - @clz(self.limbs[self.limbs.len - 1]));
+        return (self.len() - 1) * limb_bits + (limb_bits - @clz(self.limbs[self.len() - 1]));
     }
 
     /// Returns the number of bits required to represent the integer in twos-complement form.
@@ -2017,11 +2062,11 @@ pub const Const = struct {
 
         // If the entire value has only one bit set (e.g. 0b100000000) then the negation in twos
         // complement requires one less bit.
-        if (!self.positive) block: {
+        if (self.sign() == .neg) block: {
             bits += 1;
 
-            if (@popCount(self.limbs[self.limbs.len - 1]) == 1) {
-                for (self.limbs[0 .. self.limbs.len - 1]) |limb| {
+            if (@popCount(self.limbs[self.len() - 1]) == 1) {
+                for (self.limbs[0 .. self.len() - 1]) |limb| {
                     if (@popCount(limb) != 0) {
                         break :block;
                     }
@@ -2046,20 +2091,20 @@ pub const Const = struct {
     /// i.e. that limb count matches `calcLimbLen()` and zero is not negative.
     pub fn popCount(self: Const, bit_count: usize) usize {
         var sum: usize = 0;
-        if (self.positive) {
-            for (self.limbs) |limb| {
+        if (self.sign() == .pos) {
+            for (self.limbs[0..self.len()]) |limb| {
                 sum += @popCount(limb);
             }
         } else {
             assert(self.fitsInTwosComp(.signed, bit_count));
-            assert(self.limbs[self.limbs.len - 1] != 0);
+            assert(self.limbs[self.len() - 1] != 0);
 
             var remaining_bits = bit_count;
             var carry: u1 = 1;
             var add_res: Limb = undefined;
 
             // All but the most significant limb.
-            for (self.limbs[0 .. self.limbs.len - 1]) |limb| {
+            for (self.limbs[0 .. self.len() - 1]) |limb| {
                 const ov = @addWithOverflow(~limb, carry);
                 add_res = ov[0];
                 carry = ov[1];
@@ -2070,7 +2115,7 @@ pub const Const = struct {
             // The most significant limb may have fewer than @bitSizeOf(Limb) meaningful bits,
             // which we can detect with @clz().
             // There may also be fewer limbs than needed to fill bit_count.
-            const limb = self.limbs[self.limbs.len - 1];
+            const limb = self.limbs[self.len() - 1];
             const leading_zeroes = @clz(limb);
             // The most significant limb is asserted not to be all 0s (above),
             // so ~limb cannot be all 1s, and ~limb + 1 cannot overflow.
@@ -2086,11 +2131,11 @@ pub const Const = struct {
         if (self.eqlZero()) {
             return true;
         }
-        if (signedness == .unsigned and !self.positive) {
+        if (signedness == .unsigned and self.sign() == .neg) {
             return false;
         }
 
-        const req_bits = self.bitCountTwosComp() + @intFromBool(self.positive and signedness == .signed);
+        const req_bits = self.bitCountTwosComp() + @intFromBool(self.sign() == .pos and signedness == .signed);
         return bit_count >= req_bits;
     }
 
@@ -2105,7 +2150,7 @@ pub const Const = struct {
     /// value. It is inexact and may exceed the given value by ~1-2 bytes.
     /// TODO See if we can make this exact.
     pub fn sizeInBaseUpperBound(self: Const, base: usize) usize {
-        const bit_count = @as(usize, @intFromBool(!self.positive)) + self.bitCountAbs();
+        const bit_count = @as(usize, @intFromBool(self.sign() == .neg)) + self.bitCountAbs();
         return (bit_count / math.log2(base)) + 2;
     }
 
@@ -2134,17 +2179,17 @@ pub const Const = struct {
                 if (@sizeOf(UT) <= @sizeOf(Limb)) {
                     r = @as(UT, @intCast(self.limbs[0]));
                 } else {
-                    for (self.limbs[0..self.limbs.len], 0..) |_, ri| {
-                        const limb = self.limbs[self.limbs.len - ri - 1];
+                    for (self.limbs[0..self.len()], 0..) |_, ri| {
+                        const limb = self.limbs[self.len() - ri - 1];
                         r <<= limb_bits;
                         r |= limb;
                     }
                 }
 
                 if (info.signedness == .unsigned) {
-                    return if (self.positive) @as(T, @intCast(r)) else error.NegativeIntoUnsigned;
+                    return if (self.sign() == .pos) @as(T, @intCast(r)) else error.NegativeIntoUnsigned;
                 } else {
-                    if (self.positive) {
+                    if (self.sign() == .pos) {
                         return @as(T, @intCast(r));
                     } else {
                         if (math.cast(T, r)) |ok| {
@@ -2191,7 +2236,7 @@ pub const Const = struct {
         }
 
         var limbs: [128]Limb = undefined;
-        const needed_limbs = calcDivLimbsBufferLen(self.limbs.len, 1);
+        const needed_limbs = calcDivLimbsBufferLen(self.len(), 1);
         if (needed_limbs > limbs.len)
             return out_stream.writeAll("(BigInt)");
 
@@ -2200,11 +2245,11 @@ pub const Const = struct {
 
         const biggest: Const = .{
             .limbs = &([1]Limb{comptime math.maxInt(Limb)} ** available_len),
-            .positive = false,
+            .metadata = Metadata.init(.neg, available_len),
         };
         var buf: [biggest.sizeInBaseUpperBound(base)]u8 = undefined;
-        const len = self.toString(&buf, base, case, &limbs);
-        return out_stream.writeAll(buf[0..len]);
+        const out_len = self.toString(&buf, base, case, &limbs);
+        return out_stream.writeAll(buf[0..out_len]);
     }
 
     /// Converts self to a string in the requested base.
@@ -2221,7 +2266,7 @@ pub const Const = struct {
         const string = try allocator.alloc(u8, self.sizeInBaseUpperBound(base));
         errdefer allocator.free(string);
 
-        const limbs = try allocator.alloc(Limb, calcToStringLimbsBufferLen(self.limbs.len, base));
+        const limbs = try allocator.alloc(Limb, calcToStringLimbsBufferLen(self.len(), base));
         defer allocator.free(limbs);
 
         return allocator.realloc(string, self.toString(string, base, case, limbs));
@@ -2251,7 +2296,7 @@ pub const Const = struct {
         if (math.isPowerOfTwo(base)) {
             const base_shift = math.log2_int(Limb, base);
 
-            outer: for (self.limbs[0..self.limbs.len]) |limb| {
+            outer: for (self.limbs[0..self.len()]) |limb| {
                 var shift: usize = 0;
                 while (shift < limb_bits) : (shift += base_shift) {
                     const r = @as(u8, @intCast((limb >> @as(Log2Limb, @intCast(shift))) & @as(Limb, base - 1)));
@@ -2276,25 +2321,23 @@ pub const Const = struct {
             while (j < digits_per_limb) : (j += 1) {
                 limb_base *= base;
             }
-            const b: Const = .{ .limbs = &[_]Limb{limb_base}, .positive = true };
+            const b: Const = .{ .limbs = &[_]Limb{limb_base}, .metadata = Metadata.init(.pos, 1) };
 
             var q: Mutable = .{
-                .limbs = limbs_buffer[0 .. self.limbs.len + 2],
-                .positive = true, // Make absolute by ignoring self.positive.
-                .len = self.limbs.len,
+                .limbs = limbs_buffer[0 .. self.len() + 2],
+                .metadata = Metadata.init(.pos, self.len()), // Make absolute by ignoring self.positive.
             };
-            @memcpy(q.limbs[0..self.limbs.len], self.limbs);
+            @memcpy(q.limbs[0..self.len()], self.limbs);
 
             var r: Mutable = .{
-                .limbs = limbs_buffer[q.limbs.len..][0..self.limbs.len],
-                .positive = true,
-                .len = 1,
+                .limbs = limbs_buffer[q.len()..][0..self.len()],
+                .metadata = Metadata.init(.pos, 1),
             };
             r.limbs[0] = 0;
 
-            const rest_of_the_limbs_buf = limbs_buffer[q.limbs.len + r.limbs.len ..];
+            const rest_of_the_limbs_buf = limbs_buffer[q.len() + r.len() ..];
 
-            while (q.len >= 2) {
+            while (q.len() >= 2) {
                 // Passing an allocator here would not be helpful since this division is destroying
                 // information, not creating it. [TODO citation needed]
                 q.divTrunc(&r, q.toConst(), b, rest_of_the_limbs_buf);
@@ -2310,7 +2353,7 @@ pub const Const = struct {
             }
 
             {
-                assert(q.len == 1);
+                assert(q.len() == 1);
 
                 var r_word = q.limbs[0];
                 while (r_word != 0) {
@@ -2322,7 +2365,7 @@ pub const Const = struct {
             }
         }
 
-        if (!self.positive) {
+        if (self.sign() == .neg) {
             string[digits_len] = '-';
             digits_len += 1;
         }
@@ -2349,17 +2392,17 @@ pub const Const = struct {
     /// This is equivalent to storing the value of an integer with `bit_count` bits as
     /// if it were a field in packed memory at the provided bit offset.
     pub fn writePackedTwosComplement(x: Const, buffer: []u8, bit_offset: usize, bit_count: usize, endian: Endian) void {
-        assert(x.fitsInTwosComp(if (x.positive) .unsigned else .signed, bit_count));
+        assert(x.fitsInTwosComp(if (x.sign() == .pos) .unsigned else .signed, bit_count));
 
         // Copy all complete limbs
         var carry: u1 = 1;
         var limb_index: usize = 0;
         var bit_index: usize = 0;
         while (limb_index < bit_count / @bitSizeOf(Limb)) : (limb_index += 1) {
-            var limb: Limb = if (limb_index < x.limbs.len) x.limbs[limb_index] else 0;
+            var limb: Limb = if (limb_index < x.len()) x.limbs[limb_index] else 0;
 
             // 2's complement (bitwise not, then add carry bit)
-            if (!x.positive) {
+            if (x.sign() == .neg) {
                 const ov = @addWithOverflow(~limb, carry);
                 limb = ov[0];
                 carry = ov[1];
@@ -2372,10 +2415,10 @@ pub const Const = struct {
 
         // Copy the remaining bits
         if (bit_count != bit_index) {
-            var limb: Limb = if (limb_index < x.limbs.len) x.limbs[limb_index] else 0;
+            var limb: Limb = if (limb_index < x.len()) x.limbs[limb_index] else 0;
 
             // 2's complement (bitwise not, then add carry bit)
-            if (!x.positive) limb = ~limb +% carry;
+            if (x.sign() == .neg) limb = ~limb +% carry;
 
             // Write all remaining bits
             mem.writeVarPackedInt(buffer, bit_index + bit_offset, bit_count - bit_index, limb, endian);
@@ -2385,14 +2428,14 @@ pub const Const = struct {
     /// Returns `math.Order.lt`, `math.Order.eq`, `math.Order.gt` if
     /// `|a| < |b|`, `|a| == |b|`, or `|a| > |b|` respectively.
     pub fn orderAbs(a: Const, b: Const) math.Order {
-        if (a.limbs.len < b.limbs.len) {
+        if (a.len() < b.len()) {
             return .lt;
         }
-        if (a.limbs.len > b.limbs.len) {
+        if (a.len() > b.len()) {
             return .gt;
         }
 
-        var i: usize = a.limbs.len - 1;
+        var i: usize = a.len() - 1;
         while (i != 0) : (i -= 1) {
             if (a.limbs[i] != b.limbs[i]) {
                 break;
@@ -2410,15 +2453,15 @@ pub const Const = struct {
 
     /// Returns `math.Order.lt`, `math.Order.eq`, `math.Order.gt` if `a < b`, `a == b` or `a > b` respectively.
     pub fn order(a: Const, b: Const) math.Order {
-        if (a.positive != b.positive) {
+        if (a.sign() != b.sign()) {
             if (eqlZero(a) and eqlZero(b)) {
                 return .eq;
             } else {
-                return if (a.positive) .gt else .lt;
+                return if (a.sign() == .pos) .gt else .lt;
             }
         } else {
             const r = orderAbs(a, b);
-            return if (a.positive) r else switch (r) {
+            return if (a.sign() == .pos) r else switch (r) {
                 .lt => math.Order.gt,
                 .eq => math.Order.eq,
                 .gt => math.Order.lt,
@@ -2447,7 +2490,7 @@ pub const Const = struct {
     /// Returns true if `a == 0`.
     pub fn eqlZero(a: Const) bool {
         var d: Limb = 0;
-        for (a.limbs) |limb| d |= limb;
+        for (a.limbs[0..a.len()]) |limb| d |= limb;
         return d == 0;
     }
 
@@ -2465,7 +2508,7 @@ pub const Const = struct {
         // Limbs are stored in little-endian order but we need
         // to iterate big-endian.
         var total_limb_lz: Limb = 0;
-        var i: usize = a.limbs.len;
+        var i: usize = a.len();
         const bits_per_limb = @sizeOf(Limb) * 8;
         while (i != 0) {
             i -= 1;
@@ -2474,7 +2517,7 @@ pub const Const = struct {
             total_limb_lz += this_limb_lz;
             if (this_limb_lz != bits_per_limb) break;
         }
-        const total_limb_bits = a.limbs.len * bits_per_limb;
+        const total_limb_bits = a.len() * bits_per_limb;
         return total_limb_lz + bits - total_limb_bits;
     }
 
@@ -2511,10 +2554,7 @@ pub const Managed = struct {
     ///
     /// Accessing limbs directly should be avoided.
     limbs: []Limb,
-
-    /// High bit is the sign bit. If set, Managed is negative, else Managed is positive.
-    /// The remaining bits represent the number of limbs used by Managed.
-    metadata: usize,
+    metadata: Metadata,
 
     /// Creates a new `Managed`. `default_capacity` limbs will be allocated immediately.
     /// The integer value after initializing is `0`.
@@ -2525,15 +2565,14 @@ pub const Managed = struct {
     pub fn toMutable(self: Managed) Mutable {
         return .{
             .limbs = self.limbs,
-            .positive = self.isPositive(),
-            .len = self.len(),
+            .metadata = self.metadata,
         };
     }
 
     pub fn toConst(self: Managed) Const {
         return .{
-            .limbs = self.limbs[0..self.len()],
-            .positive = self.isPositive(),
+            .limbs = self.limbs.ptr,
+            .metadata = self.metadata,
         };
     }
 
@@ -2553,7 +2592,7 @@ pub const Managed = struct {
     pub fn initCapacity(allocator: Allocator, capacity: usize) !Managed {
         return Managed{
             .allocator = allocator,
-            .metadata = 1,
+            .metadata = Metadata.init(.pos, 1),
             .limbs = block: {
                 const limbs = try allocator.alloc(Limb, @max(default_capacity, capacity));
                 limbs[0] = 0;
@@ -2564,33 +2603,24 @@ pub const Managed = struct {
 
     /// Returns the number of limbs currently in use.
     pub fn len(self: Managed) usize {
-        return self.metadata & ~sign_bit;
+        return self.metadata.len();
     }
 
-    /// Returns whether an Managed is positive.
-    pub fn isPositive(self: Managed) bool {
-        return self.metadata & sign_bit == 0;
-    }
-
-    /// Sets the sign of an Managed.
-    pub fn setSign(self: *Managed, positive: bool) void {
-        if (positive) {
-            self.metadata &= ~sign_bit;
-        } else {
-            self.metadata |= sign_bit;
-        }
+    /// Returns the sign of self
+    pub fn sign(self: Managed) Sign {
+        return self.metadata.sign();
     }
 
     /// Sets the length of an Managed.
     ///
     /// If setLen is used, then the Managed must be normalized to suit.
     pub fn setLen(self: *Managed, new_len: usize) void {
-        self.metadata &= sign_bit;
-        self.metadata |= new_len;
+        self.metadata = self.metadata.withLen(new_len);
     }
 
-    pub fn setMetadata(self: *Managed, positive: bool, length: usize) void {
-        self.metadata = if (positive) length & ~sign_bit else length | sign_bit;
+    /// Sets the sign of an Managed.
+    pub fn setSign(self: *Managed, new_sign: Sign) void {
+        self.metadata = self.metadata.withSign(new_sign);
     }
 
     /// Ensures an Managed has enough space allocated for capacity limbs. If the Managed does not have
@@ -2631,11 +2661,11 @@ pub const Managed = struct {
     /// Copies the value of the integer to an existing `Managed` so that they both have the same value.
     /// Extra memory will be allocated if the receiver does not have enough capacity.
     pub fn copy(self: *Managed, other: Const) !void {
-        if (self.limbs.ptr == other.limbs.ptr) return;
+        if (self.limbs.ptr == other.limbs) return;
 
-        try self.ensureCapacity(other.limbs.len);
-        @memcpy(self.limbs[0..other.limbs.len], other.limbs[0..other.limbs.len]);
-        self.setMetadata(other.positive, other.limbs.len);
+        try self.ensureCapacity(other.len());
+        @memcpy(self.limbs[0..other.len()], other.limbs[0..other.len()]);
+        self.metadata = other.metadata;
     }
 
     /// Efficiently swap a `Managed` with another. This swaps the limb pointers and a full copy is not
@@ -2649,17 +2679,17 @@ pub const Managed = struct {
         for (self.limbs[0..self.len()]) |limb| {
             std.debug.print("{x} ", .{limb});
         }
-        std.debug.print("capacity={} positive={}\n", .{ self.limbs.len, self.isPositive() });
+        std.debug.print("capacity={} positive={}\n", .{ self.limbs.len, self.sign() == .pos });
     }
 
     /// Negate the sign.
     pub fn negate(self: *Managed) void {
-        self.metadata ^= sign_bit;
+        self.setSign(self.sign().negate());
     }
 
     /// Make positive.
     pub fn abs(self: *Managed) void {
-        self.metadata &= ~sign_bit;
+        self.setSign(.pos);
     }
 
     pub fn isOdd(self: Managed) bool {
@@ -2708,7 +2738,7 @@ pub const Managed = struct {
         try self.ensureCapacity(calcLimbLen(value));
         var m = self.toMutable();
         m.set(value);
-        self.setMetadata(m.positive, m.len);
+        self.metadata = m.metadata;
     }
 
     pub const ConvertError = Const.ConvertError;
@@ -2737,7 +2767,7 @@ pub const Managed = struct {
         defer self.allocator.free(limbs_buffer);
         var m = self.toMutable();
         try m.setString(base, value, limbs_buffer, self.allocator);
-        self.setMetadata(m.positive, m.len);
+        self.metadata = m.metadata;
     }
 
     /// Set self to either bound of a 2s-complement integer.
@@ -2752,7 +2782,7 @@ pub const Managed = struct {
         try r.ensureCapacity(calcTwosCompLimbCount(bit_count));
         var m = r.toMutable();
         m.setTwosCompIntLimit(limit, signedness, bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// Converts self to a string in the requested base. Memory is allocated from the provided
@@ -2832,7 +2862,7 @@ pub const Managed = struct {
         try r.ensureAddScalarCapacity(a.toConst(), scalar);
         var m = r.toMutable();
         m.addScalar(a.toConst(), scalar);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = a + b
@@ -2844,7 +2874,7 @@ pub const Managed = struct {
         try r.ensureAddCapacity(a.toConst(), b.toConst());
         var m = r.toMutable();
         m.add(a.toConst(), b.toConst());
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = a + b with 2s-complement wrapping semantics. Returns whether any overflow occurred.
@@ -2862,7 +2892,7 @@ pub const Managed = struct {
         try r.ensureTwosCompCapacity(bit_count);
         var m = r.toMutable();
         const wrapped = m.addWrap(a.toConst(), b.toConst(), signedness, bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
         return wrapped;
     }
 
@@ -2875,7 +2905,7 @@ pub const Managed = struct {
         try r.ensureTwosCompCapacity(bit_count);
         var m = r.toMutable();
         m.addSat(a.toConst(), b.toConst(), signedness, bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = a - b
@@ -2887,7 +2917,7 @@ pub const Managed = struct {
         try r.ensureCapacity(@max(a.len(), b.len()) + 1);
         var m = r.toMutable();
         m.sub(a.toConst(), b.toConst());
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = a - b with 2s-complement wrapping semantics. Returns whether any overflow occurred.
@@ -2905,7 +2935,7 @@ pub const Managed = struct {
         try r.ensureTwosCompCapacity(bit_count);
         var m = r.toMutable();
         const wrapped = m.subWrap(a.toConst(), b.toConst(), signedness, bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
         return wrapped;
     }
 
@@ -2924,7 +2954,7 @@ pub const Managed = struct {
         try r.ensureTwosCompCapacity(bit_count);
         var m = r.toMutable();
         m.subSat(a.toConst(), b.toConst(), signedness, bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// rma = a * b
@@ -2950,7 +2980,7 @@ pub const Managed = struct {
             defer rma.allocator.free(limbs_buffer);
             m.mul(a.toConst(), b.toConst(), limbs_buffer, rma.allocator);
         }
-        rma.setMetadata(m.positive, m.len);
+        rma.metadata = m.metadata;
     }
 
     /// rma = a * b with 2s-complement wrapping semantics.
@@ -2983,7 +3013,7 @@ pub const Managed = struct {
             defer rma.allocator.free(limbs_buffer);
             m.mulWrap(a.toConst(), b.toConst(), signedness, bit_count, limbs_buffer, rma.allocator);
         }
-        rma.setMetadata(m.positive, m.len);
+        rma.metadata = m.metadata;
     }
 
     pub fn ensureTwosCompCapacity(r: *Managed, bit_count: usize) !void {
@@ -2991,15 +3021,15 @@ pub const Managed = struct {
     }
 
     pub fn ensureAddScalarCapacity(r: *Managed, a: Const, scalar: anytype) !void {
-        try r.ensureCapacity(@max(a.limbs.len, calcLimbLen(scalar)) + 1);
+        try r.ensureCapacity(@max(a.len(), calcLimbLen(scalar)) + 1);
     }
 
     pub fn ensureAddCapacity(r: *Managed, a: Const, b: Const) !void {
-        try r.ensureCapacity(@max(a.limbs.len, b.limbs.len) + 1);
+        try r.ensureCapacity(@max(a.len(), b.len()) + 1);
     }
 
     pub fn ensureMulCapacity(rma: *Managed, a: Const, b: Const) !void {
-        try rma.ensureCapacity(a.limbs.len + b.limbs.len + 1);
+        try rma.ensureCapacity(a.len() + b.len() + 1);
     }
 
     /// q = a / b (rem r)
@@ -3015,8 +3045,8 @@ pub const Managed = struct {
         const limbs_buffer = try q.allocator.alloc(Limb, calcDivLimbsBufferLen(a.len(), b.len()));
         defer q.allocator.free(limbs_buffer);
         mq.divFloor(&mr, a.toConst(), b.toConst(), limbs_buffer);
-        q.setMetadata(mq.positive, mq.len);
-        r.setMetadata(mr.positive, mr.len);
+        q.metadata = mq.metadata;
+        r.metadata = mr.metadata;
     }
 
     /// q = a / b (rem r)
@@ -3032,8 +3062,8 @@ pub const Managed = struct {
         const limbs_buffer = try q.allocator.alloc(Limb, calcDivLimbsBufferLen(a.len(), b.len()));
         defer q.allocator.free(limbs_buffer);
         mq.divTrunc(&mr, a.toConst(), b.toConst(), limbs_buffer);
-        q.setMetadata(mq.positive, mq.len);
-        r.setMetadata(mr.positive, mr.len);
+        q.metadata = mq.metadata;
+        r.metadata = mr.metadata;
     }
 
     /// r = a << shift, in other words, r = a * 2^shift
@@ -3042,7 +3072,7 @@ pub const Managed = struct {
         try r.ensureCapacity(a.len() + (shift / limb_bits) + 1);
         var m = r.toMutable();
         m.shiftLeft(a.toConst(), shift);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = a <<| shift with 2s-complement saturating semantics.
@@ -3051,7 +3081,7 @@ pub const Managed = struct {
         try r.ensureTwosCompCapacity(bit_count);
         var m = r.toMutable();
         m.shiftLeftSat(a.toConst(), shift, signedness, bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = a >> shift
@@ -3059,12 +3089,11 @@ pub const Managed = struct {
     pub fn shiftRight(r: *Managed, a: *const Managed, shift: usize) !void {
         if (a.len() <= shift / limb_bits) {
             // Shifting negative numbers converges to -1 instead of 0
-            if (a.isPositive()) {
-                r.metadata = 1;
+            if (a.sign() == .pos) {
+                r.metadata = Metadata.init(.pos, 1);
                 r.limbs[0] = 0;
             } else {
-                r.metadata = 1;
-                r.setSign(false);
+                r.metadata = Metadata.init(.neg, 1);
                 r.limbs[0] = 1;
             }
             return;
@@ -3073,7 +3102,7 @@ pub const Managed = struct {
         try r.ensureCapacity(a.len() - (shift / limb_bits));
         var m = r.toMutable();
         m.shiftRight(a.toConst(), shift);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = ~a under 2s-complement wrapping semantics.
@@ -3082,7 +3111,7 @@ pub const Managed = struct {
         try r.ensureTwosCompCapacity(bit_count);
         var m = r.toMutable();
         m.bitNotWrap(a.toConst(), signedness, bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = a | b
@@ -3092,29 +3121,29 @@ pub const Managed = struct {
         try r.ensureCapacity(@max(a.len(), b.len()));
         var m = r.toMutable();
         m.bitOr(a.toConst(), b.toConst());
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = a & b
     pub fn bitAnd(r: *Managed, a: *const Managed, b: *const Managed) !void {
-        const cap = if (a.isPositive() or b.isPositive())
+        const cap = if (a.sign() == .pos or b.sign() == .pos)
             @min(a.len(), b.len())
         else
             @max(a.len(), b.len()) + 1;
         try r.ensureCapacity(cap);
         var m = r.toMutable();
         m.bitAnd(a.toConst(), b.toConst());
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = a ^ b
     pub fn bitXor(r: *Managed, a: *const Managed, b: *const Managed) !void {
-        const cap = @max(a.len(), b.len()) + @intFromBool(a.isPositive() != b.isPositive());
+        const cap = @max(a.len(), b.len()) + @intFromBool(a.sign() != b.sign());
         try r.ensureCapacity(cap);
 
         var m = r.toMutable();
         m.bitXor(a.toConst(), b.toConst());
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// rma may alias x or y.
@@ -3127,7 +3156,7 @@ pub const Managed = struct {
         var limbs_buffer = std.ArrayList(Limb).init(rma.allocator);
         defer limbs_buffer.deinit();
         try m.gcd(x.toConst(), y.toConst(), &limbs_buffer);
-        rma.setMetadata(m.positive, m.len);
+        rma.metadata = m.metadata;
     }
 
     /// r = a * a
@@ -3139,7 +3168,7 @@ pub const Managed = struct {
             errdefer m.deinit();
             var m_mut = m.toMutable();
             m_mut.sqrNoAlias(a.toConst(), rma.allocator);
-            m.setMetadata(m_mut.positive, m_mut.len);
+            m.metadata = m_mut.metadata;
 
             rma.deinit();
             rma.swap(&m);
@@ -3147,7 +3176,7 @@ pub const Managed = struct {
             try rma.ensureCapacity(needed_limbs);
             var rma_mut = rma.toMutable();
             rma_mut.sqrNoAlias(a.toConst(), rma.allocator);
-            rma.setMetadata(rma_mut.positive, rma_mut.len);
+            rma.metadata = rma_mut.metadata;
         }
     }
 
@@ -3162,7 +3191,6 @@ pub const Managed = struct {
             errdefer m.deinit();
             var m_mut = m.toMutable();
             m_mut.pow(a.toConst(), b, limbs_buffer);
-            m.setMetadata(m_mut.positive, m_mut.len);
 
             rma.deinit();
             rma.swap(&m);
@@ -3170,7 +3198,7 @@ pub const Managed = struct {
             try rma.ensureCapacity(needed_limbs);
             var rma_mut = rma.toMutable();
             rma_mut.pow(a.toConst(), b, limbs_buffer);
-            rma.setMetadata(rma_mut.positive, rma_mut.len);
+            rma.metadata = rma_mut.metadata;
         }
     }
 
@@ -3195,7 +3223,7 @@ pub const Managed = struct {
         try rma.ensureCapacity((a.len() - 1) / 2 + 1);
         var m = rma.toMutable();
         m.sqrt(a.toConst(), limbs_buffer);
-        rma.setMetadata(m.positive, m.len);
+        rma.metadata = m.metadata;
     }
 
     /// r = truncate(Int(signedness, bit_count), a)
@@ -3203,7 +3231,7 @@ pub const Managed = struct {
         try r.ensureCapacity(calcTwosCompLimbCount(bit_count));
         var m = r.toMutable();
         m.truncate(a.toConst(), signedness, bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = saturate(Int(signedness, bit_count), a)
@@ -3211,7 +3239,7 @@ pub const Managed = struct {
         try r.ensureCapacity(calcTwosCompLimbCount(bit_count));
         var m = r.toMutable();
         m.saturate(a.toConst(), signedness, bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 
     /// r = @popCount(a) with 2s-complement semantics.
@@ -3220,7 +3248,7 @@ pub const Managed = struct {
         try r.ensureCapacity(calcTwosCompLimbCount(bit_count));
         var m = r.toMutable();
         m.popCount(a.toConst(), bit_count);
-        r.setMetadata(m.positive, m.len);
+        r.metadata = m.metadata;
     }
 };
 
@@ -4189,14 +4217,12 @@ fn subMulLimbWithBorrow(a: Limb, b: Limb, c: Limb, carry: *Limb) Limb {
 fn fixedIntFromSignedDoubleLimb(A: SignedDoubleLimb, storage: []Limb) Mutable {
     assert(storage.len >= 2);
 
-    const A_is_positive = A >= 0;
     const Au = @as(DoubleLimb, @intCast(if (A < 0) -A else A));
     storage[0] = @as(Limb, @truncate(Au));
     storage[1] = @as(Limb, @truncate(Au >> limb_bits));
     return .{
         .limbs = storage[0..2],
-        .positive = A_is_positive,
-        .len = 2,
+        .metadata = Metadata.init(Sign.fromBool(A >= 0), 2),
     };
 }
 
